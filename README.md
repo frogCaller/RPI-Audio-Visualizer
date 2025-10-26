@@ -51,7 +51,7 @@ A music visualizer for Raspberry Pi using a 2.23-inch OLED HAT.
 
 # Usage
    ```bash
-   python3 music.py
+   python3 start.py
    ```
    Open a browser and go to:
    ```bash
