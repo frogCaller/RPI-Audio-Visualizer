@@ -18,13 +18,12 @@ WIDTH, HEIGHT = disp.width, disp.height
 image = Image.new("1", (WIDTH, HEIGHT))
 draw = ImageDraw.Draw(image)
 
-MUSIC_DIR = 'Music'
-COVERS_DIR = 'static/covers'
-DEFAULT_COVER = '/static/covers/default_art.png'
-os.makedirs(MUSIC_DIR, exist_ok=True)
-os.makedirs(COVERS_DIR, exist_ok=True)
 current_index = 0
 current_song_path = None
+MUSIC_DIR = 'Music'
+os.makedirs(MUSIC_DIR, exist_ok=True)
+COVERS_DIR = 'static/covers'
+DEFAULT_COVER = '/static/covers/default_art.png'
 
 def safe_filename(name):
     return re.sub(r'[^A-Za-z0-9._-]+', '_', name)
@@ -176,7 +175,7 @@ def init_audio():
         time.sleep(0.5)
         pygame.mixer.init()
         #print("[Running in silent mode (no audio output)]")
-        
+
 init_audio()
 
 num_bars = WIDTH // 4
@@ -198,7 +197,7 @@ def get_music_library():
     normalized_index = {normalize(os.path.splitext(os.path.basename(f))[0]): f for f in music_files}
     print(f"[Loaded {len(music_files)} songs]")
     return music_files, normalized_index
-  
+
 visualizer_thread = None
 
 def play_song(user_input=None):
@@ -311,9 +310,9 @@ def music_visualizer_thread(song_file):
 app = Flask(__name__)
 
 # --- SILENCE ACCESS LOGS ---
-import logging
-log = logging.getLogger('werkzeug')
-log.setLevel(logging.ERROR)
+#import logging
+#log = logging.getLogger('werkzeug')
+#log.setLevel(logging.ERROR)
 # ---------------------------
 
 @app.route("/")
@@ -335,7 +334,7 @@ def resume_route():
 @app.route("/stop")
 def stop_route():
     return stop_music()
-  
+
 @app.route("/next")
 def next_song():
     global current_index
@@ -353,7 +352,7 @@ def prev_song():
         return "No songs found."
     current_index = (current_index - 1) % len(music_files)
     return play_song(os.path.basename(music_files[current_index]))
-  
+
 @app.route("/library")
 def list_songs():
     music_files, _ = get_music_library()
@@ -363,23 +362,35 @@ def list_songs():
         html += f"<p><a href='/play_song/{name}' style='color:lightgreen;text-decoration:none;'>{name}</a></p>"
     html += "<p><a href='/'>⬅️ Back</a></p>"
     return html
-  
 
-  
+
+
 @app.route("/library_json")
 def library_json():
     songs = []
     os.makedirs(COVERS_DIR, exist_ok=True)
+    os.makedirs(MUSIC_DIR, exist_ok=True)  # Ensure Music folder exists
 
     if not hasattr(app, "cover_cache"):
         app.cover_cache = set()
     if not hasattr(app, "cover_failed"):
         app.cover_failed = set()
 
-    for fname in os.listdir(MUSIC_DIR):
-        if not fname.lower().endswith(('.mp3', '.wav', '.flac', '.m4a')):
-            continue
+    # Get all valid audio files
+    valid_files = [
+        f for f in os.listdir(MUSIC_DIR)
+        if f.lower().endswith(('.mp3', '.wav', '.flac', '.m4a'))
+    ]
 
+    # ---If no songs found, show friendly message ---
+    if not valid_files:
+        return jsonify({
+            "empty": True,
+            "message": "No music found. Please add songs to the Music/ folder."
+        })
+
+    # ---Process available songs ---
+    for fname in valid_files:
         path = os.path.join(MUSIC_DIR, fname)
         artist, title = "Unknown", os.path.splitext(fname)[0]
 
@@ -400,7 +411,6 @@ def library_json():
                 parts = name.split(" - ", 1)
                 if len(parts) == 2:
                     first, second = parts[0].strip(), parts[1].strip()
-
                     if len(second.split()) <= 3 and any(c.isupper() for c in second):
                         title, artist = first, second
                     else:
@@ -420,11 +430,9 @@ def library_json():
             art = DEFAULT_COVER
 
             if key not in app.cover_cache and key not in app.cover_failed:
-                # Avoid duplicate queue items
                 if not any(task[1] == artist and task[2] == title for task in list(cover_queue.queue)):
-                    #print(f"[Queuing cover fetch for {artist} - {title}]")
                     cover_queue.put((path, artist, title, fname))
-                    app.cover_failed.add(key)  # mark as attempted once
+                    app.cover_failed.add(key)
 
         songs.append({
             "filename": fname,
@@ -433,8 +441,9 @@ def library_json():
             "art": art
         })
 
-    return jsonify(songs)
-  
+    # Return normal song list
+    return jsonify({"empty": False, "songs": songs})
+
 @app.route("/status")
 def current_status():
     global current_song_path
@@ -447,7 +456,7 @@ def current_status():
         return f"Paused: {song_name}"
     else:
         return "Stopped."
-  
+
 @app.route("/play_song/<filename>")
 def play_specific_song(filename):
     return play_song(filename)
