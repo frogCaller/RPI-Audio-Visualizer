@@ -1,5 +1,3 @@
-# UNDER CONSTRUCTION
-
 # Raspberry Pi OLED Audio Visualizer
 
 <div style="display: flex; gap: 10px;">   
@@ -55,6 +53,8 @@ A music visualizer for Raspberry Pi using a 2.23-inch OLED HAT.
    ./setup.sh
 
 # Usage
+-  By default, the app includes one sample song.
+-  To expand your library, add more songs to the Music folder before starting the app.
    ```bash
    python3 start.py
    ```
@@ -63,7 +63,6 @@ A music visualizer for Raspberry Pi using a 2.23-inch OLED HAT.
    http://<raspberrypi-IP>:5000
    ```
    Replace <raspberrypi-IP> with your Raspberry Pi’s actual IP address (e.i. http://192.168.0.78:5000).
-
 
 # Troubleshooting
 - Common Issues:
