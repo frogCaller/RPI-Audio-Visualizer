@@ -18,11 +18,13 @@ WIDTH, HEIGHT = disp.width, disp.height
 image = Image.new("1", (WIDTH, HEIGHT))
 draw = ImageDraw.Draw(image)
 
-current_index = 0
-current_song_path = None
 MUSIC_DIR = 'Music'
 COVERS_DIR = 'static/covers'
 DEFAULT_COVER = '/static/covers/default_art.png'
+os.makedirs(MUSIC_DIR, exist_ok=True)
+os.makedirs(COVERS_DIR, exist_ok=True)
+current_index = 0
+current_song_path = None
 
 def safe_filename(name):
     return re.sub(r'[^A-Za-z0-9._-]+', '_', name)
