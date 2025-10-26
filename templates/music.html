@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.6.0/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <title>RPi Music Visualizer</title>
+</head>
+<body>
+
+<header>
+    <h1>RPi Music Visualizer</h1>
+
+    <div class="controls">
+        <button class="btn primary" onclick="send('/play')"><i class="fa-solid fa-shuffle"></i></button>
+        <button class="btn" onclick="send('/pause')"><i class="fa-solid fa-pause"></i></button>
+        <button class="btn" onclick="send('/resume')"><i class="fa-solid fa-play"></i></button>
+        <button class="btn" onclick="send('/stop')"><i class="fa-solid fa-stop"></i></button>
+        <button class="btn" onclick="send('/prev')"><i class="fa-solid fa-backward-step"></i></button>
+        <button class="btn" onclick="send('/next')"><i class="fa-solid fa-forward-step"></i></button>
+    </div>
+    <p id="status"></p>
+</header>
+
+<main>
+    <div class="grid" id="song-grid">
+        <!-- Filled by JS -->
+    </div>
+</main>
+  
+<script src="{{ url_for('static', filename='visualizer.js') }}"></script>
+
+  </body>
+</html>
