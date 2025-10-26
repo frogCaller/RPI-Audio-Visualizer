@@ -24,11 +24,15 @@
 </header>
 
 <main>
+    <p id="empty-message" style="text-align:center; color:gray; font-style:italic; display:none;">
+        No music found. Please add songs to the <b>Music/</b> folder.
+    </p>
+
     <div class="grid" id="song-grid">
         <!-- Filled by JS -->
     </div>
 </main>
-  
+
 <script src="{{ url_for('static', filename='visualizer.js') }}"></script>
 
   </body>
