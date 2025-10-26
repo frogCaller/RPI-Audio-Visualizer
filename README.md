@@ -1,8 +1,8 @@
 # Raspberry Pi OLED Audio Visualizer
 
 <div style="display: flex; gap: 10px;">   
-    <img src="images/visualizer.GIF" width="168">
-    <img src="images/visualizer2.GIF" width="168">
+    <img src="images/visualizer.GIF" width="250">
+    <img src="images/visualizer2.GIF" width="250">
 </div>
 
 A music visualizer for Raspberry Pi using a 2.23-inch OLED HAT.
