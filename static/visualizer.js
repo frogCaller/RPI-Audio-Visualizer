@@ -17,7 +17,15 @@ async function loadSongs() {
     const grid = document.getElementById('song-grid');
     grid.innerHTML = '';
 
-    data.forEach(s => {
+    // Handle empty case
+    if (data.empty) {
+        document.getElementById('empty-message').style.display = 'block';
+        return;
+    }
+    document.getElementById('empty-message').style.display = 'none';
+
+    // Use data.songs instead of data
+    data.songs.forEach(s => {
         const card = document.createElement('div');
         card.className = 'song-card';
         card.onclick = () => playSong(s.filename);
@@ -36,16 +44,15 @@ async function loadSongs() {
         info.innerHTML = `
             <div class="title" title="${s.title}">${s.title}</div>
             <div class="artist">${s.artist || 'Unknown'}</div>
-            `;
+        `;
+
         card.appendChild(art);
         card.appendChild(info);
         grid.appendChild(card);
     });
 
     document.querySelectorAll('img[loading="lazy"]').forEach(img => {
-        img.addEventListener('load', () => {
-            img.classList.add('loaded');
-        });
+        img.addEventListener('load', () => img.classList.add('loaded'));
     });
 }
 async function refreshStatus() {
@@ -53,7 +60,7 @@ async function refreshStatus() {
     const txt = await res.text();
     document.getElementById('status').innerText = txt;
 }
-
+// Auto-refresh every 5 seconds
 window.addEventListener('load', () => {
     loadSongs();
     refreshStatus();
