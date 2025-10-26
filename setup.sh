@@ -97,9 +97,8 @@ done
 # ---------- 7. Final instructions ----------
 log "Setup complete!"
 echo
-echo "   • Virtual environment: ./${VENV_NAME}"
-echo "   • Activate anytime:    source ${VENV_NAME}/bin/activate"
-echo "   • Run your app:        python music.py"
+echo "   • Virtual environment created:     ./${VENV_NAME}"
+echo "   • Run your app:                    python start.py"
 echo
 
 # Keep the terminal open if the script was double-clicked
