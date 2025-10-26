@@ -45,6 +45,9 @@ A music visualizer for Raspberry Pi using a 2.23-inch OLED HAT.
    ```
 
 5. **Install System and Python Dependencies:**
+
+   - Automatically creates a dedicated Python virtual environment (`Music_env`) and installs the required dependencies.
+    
    ```bash
    chmod +x setup.sh
    ./setup.sh
