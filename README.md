@@ -1,4 +1,4 @@
-# Raspberry Pi OLED Audio Visualizer
+# Raspberry Pi Audio Visualizer
 
 <div style="display: flex; gap: 10px;">   
     <img src="images/visualizer.GIF" width="250">
