@@ -17,7 +17,7 @@ disp.clear()
 WIDTH, HEIGHT = disp.width, disp.height
 image = Image.new("1", (WIDTH, HEIGHT))
 draw = ImageDraw.Draw(image)
-
+cached_samples = None
 current_index = 0
 current_song_path = None
 MUSIC_DIR = 'Music'
@@ -229,6 +229,13 @@ def play_song(user_input=None):
     # --- Load + play song ---
     pygame.mixer.music.load(chosen_song)
     pygame.mixer.music.play()
+    global cached_samples
+    try:
+        sound = pygame.mixer.Sound(chosen_song)
+        cached_samples = pygame.sndarray.array(sound).mean(axis=1)
+    except Exception as e:
+        print("[Warning: failed to cache samples:", e, "]")
+        cached_samples = None
     print(f"Playing: {os.path.basename(chosen_song)}")
 
     # --- Start visualizer ---
@@ -266,14 +273,21 @@ def resume_music():
         pygame.mixer.music.unpause()
         music_paused = False
         music_visualizer_active = True
+
+        if not any(t.name == "VisualizerThread" and t.is_alive() for t in threading.enumerate()):
+            threading.Thread(target=music_visualizer_thread, args=(current_song_path,), daemon=True, name="VisualizerThread").start()
+
         return "Resumed music."
     return "Nothing to resume."
 
+
 def music_visualizer_thread(song_file):
-    global bar_heights
+    global bar_heights, cached_samples
     try:
-        sound = pygame.mixer.Sound(song_file)
-        samples = pygame.sndarray.array(sound).mean(axis=1)
+        if cached_samples is None:
+            sound = pygame.mixer.Sound(song_file)
+            cached_samples = pygame.sndarray.array(sound).mean(axis=1)
+        samples = cached_samples
         total_len = len(samples)
         chunk_size = max(1, total_len // 5000)
 
