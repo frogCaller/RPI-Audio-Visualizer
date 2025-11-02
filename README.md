@@ -3,6 +3,7 @@
 <div style="display: flex; gap: 10px;">   
     <img src="images/visualizer.GIF" width="250">
     <img src="images/visualizer2.GIF" width="250">
+    <img src="images/RPi-Music.png" height="250">
 </div>
 
 A music visualizer for Raspberry Pi using a 2.23-inch OLED HAT.
@@ -10,7 +11,7 @@ A music visualizer for Raspberry Pi using a 2.23-inch OLED HAT.
 ## Features
 - **OLED Visualizer**: Real-time bar graph visualization of audio frequencies on the 2.23-inch OLED HAT.
 - **Web UI**: Browse and play songs from a local webui.
-- **Drag & Drop Uploads** – Instantly add new songs by dragging and dropping music files into the web page. 
+- **Drag & Drop Songs** – Instantly add new songs by dragging and dropping music files into the web page. 
 - **Audio Playback**: Uses Pygame for playback.
 - **Cover Art**: Automatically fetches and caches album covers.
 
