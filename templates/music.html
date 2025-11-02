@@ -8,9 +8,11 @@
   <title>RPi Music</title>
 </head>
 <body>
+
 <header>
   <h1>RPi Music</h1>
 </header>
+
 <main>
   <p id="empty-message" style="text-align:center; color:gray; font-style:italic; display:none;">
     No music found. Please add songs to the <b>Music/</b> folder.
@@ -20,22 +22,25 @@
     <!-- Filled by JS -->
   </div>
 </main>
+
 <!-- Drag & Drop overlay -->
 <div id="drop-zone"></div>
   
   <div class="controls">
-    <button class="btn primary" onclick="send('/play')"><i class="fa-solid fa-shuffle"></i></button>
+    <button class="btn" onclick="send('/play')"><i class="fa-solid fa-music"></i></button>
     <button class="btn" id="toggle-btn" onclick="togglePlayPause()">
       <i class="fa-solid fa-play"></i>
     </button>
-    <button class="btn" onclick="send('/stop')"><i class="fa-solid fa-stop"></i></button>
+    <!-- <button class="btn" onclick="send('/stop')"><i class="fa-solid fa-stop"></i></button> -->
     <button class="btn" onclick="prevSong()"><i class="fa-solid fa-backward-step"></i></button>
     <button class="btn" onclick="nextSong()"><i class="fa-solid fa-forward-step"></i></button>
+    
+    <button class="btn" onclick="document.getElementById('file-input').click()"><i class="fa-solid fa-upload"></i></button>
+    <input type="file" id="file-input" accept=".mp3,.wav,.flac,.m4a" multiple style="display:none;">
   </div>
   
   <p id="status" style="text-align:center; margin-top:10px;"></p>
-  
-<script src="{{ url_for('static', filename='visualizer.js') }}"></script>
 
+<script src="{{ url_for('static', filename='visualizer.js') }}"></script>
 </body>
 </html>
