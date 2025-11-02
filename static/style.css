@@ -50,7 +50,14 @@ h1 {
 }
 .btn:hover { background: #2a2a2a; }
 .btn:active { transform: scale(.95); }
-.btn.primary { background: var(--accent); color: #000; }
+.btn.primary {
+  background: var(--card);
+  color: var(--text);
+}
+.btn.primary.active {
+  background: var(--accent);
+  color: #000;
+}
 #status {
     margin: .8rem 0;
     font-weight: 600;
@@ -99,6 +106,10 @@ main::-webkit-scrollbar {
 .song-card:hover {
     transform: translateY(-4px);
     box-shadow: 0 8px 20px rgba(0,0,0,.4);
+}
+.song-card.active-song {
+  border: 2px solid #8f92df;
+  transform: scale(1.03);
 }
 .art {
     width: 100%;
