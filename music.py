@@ -18,6 +18,7 @@ WIDTH, HEIGHT = disp.width, disp.height
 image = Image.new("1", (WIDTH, HEIGHT))
 draw = ImageDraw.Draw(image)
 cached_samples = None
+cached_path = None
 current_index = 0
 current_song_path = None
 MUSIC_DIR = 'Music'
@@ -153,7 +154,10 @@ def buffer():
 def clear_display():
     draw.rectangle((0, 0, WIDTH, HEIGHT), outline=0, fill=0)
     buffer()
-
+    
+    
+jackInput = False
+    
 def init_audio_jack():
     try:
         os.environ["SDL_AUDIODRIVER"] = "alsa"
@@ -170,6 +174,7 @@ def init_audio_jack():
     except Exception as e:
         os.environ["SDL_AUDIODRIVER"] = "dummy"
         pygame.mixer.init()
+        
 
 def init_audio():
     try:
@@ -179,22 +184,21 @@ def init_audio():
     except Exception as e:
         print(f"[Audio init failed: {e}]")
 
-        # --- Try detecting available ALSA devices automatically ---
         try:
             cards = subprocess.check_output(["aplay", "-l"], text=True)
-            print("[Detected sound devices:]")
-            print(cards)
         except Exception:
             print("[Could not list ALSA devices]")
-
-        #print("[Falling back to dummy (silent mode)]")
+            
         os.environ["SDL_AUDIODRIVER"] = "dummy"
         time.sleep(0.5)
         pygame.mixer.init()
-        #print("[Running in silent mode (no audio output)]")
+    
 
-#init_audio_jack()
-init_audio()
+if jackInput:
+    init_audio_jack()
+else:
+    init_audio()
+    
 
 num_bars = WIDTH // 4
 bar_width = 4
@@ -220,10 +224,16 @@ visualizer_thread = None
 
 def play_song(user_input=None):
     global music_visualizer_active, bar_heights, current_index, current_song_path
+    global cached_samples, cached_path
 
+    # --- Gracefully stop any current playback ---
     music_visualizer_active = False
-    pygame.mixer.music.stop()
-    time.sleep(0.2)
+    try:
+        if pygame.mixer.music.get_busy():
+            pygame.mixer.music.fadeout(200)
+        time.sleep(0.1)
+    except Exception:
+        pass
 
     bar_heights[:] = 0
     clear_display()
@@ -232,34 +242,60 @@ def play_song(user_input=None):
     if not music_files:
         return "[Error: No music files in ~/Music]"
 
+    # --- Choose song ---
     chosen_song = None
     if user_input:
         for f in music_files:
             if os.path.basename(f) == user_input:
                 chosen_song = f
                 break
-
     if not chosen_song:
         chosen_song = random.choice(music_files)
 
     current_song_path = chosen_song
+    print(f"Loading: {os.path.basename(chosen_song)}")
 
-    # --- Load + play song ---
-    pygame.mixer.music.load(chosen_song)
-    pygame.mixer.music.play()
-    global cached_samples
-    try:
-        sound = pygame.mixer.Sound(chosen_song)
-        cached_samples = pygame.sndarray.array(sound).mean(axis=1)
-    except Exception as e:
-        print("[Warning: failed to cache samples:", e, "]")
-        cached_samples = None
-    print(f"Playing: {os.path.basename(chosen_song)}")
+    # --- Start playback asynchronously ---
+    def start_playback():
+        try:
+            pygame.mixer.music.load(chosen_song)
+            pygame.mixer.music.play()
+            print(f"{os.path.basename(chosen_song)}")
+        except Exception as e:
+            print(f"[Audio playback error: {e}]")
 
-    # --- Start visualizer ---
-    music_visualizer_active = True
-    visualizer_thread = threading.Thread(target=music_visualizer_thread, args=(chosen_song,), daemon=True)
-    visualizer_thread.start()
+    threading.Thread(target=start_playback, daemon=True).start()
+
+    # --- Async waveform cache (background) ---
+    def preload_samples(path):
+        global cached_samples, cached_path
+        try:
+            sound = pygame.mixer.Sound(path)
+            cached_samples = pygame.sndarray.array(sound).mean(axis=1)
+            cached_path = path
+            print(f"[Cached samples for {os.path.basename(path)}]")
+        except Exception as e:
+            cached_samples = None
+            cached_path = None
+            print(f"[Warning: failed to cache samples: {e}]")
+
+    threading.Thread(target=preload_samples, args=(chosen_song,), daemon=True).start()
+
+    # --- Delay visualizer start slightly until audio ready ---
+    def start_visualizer_later():
+        time.sleep(0.4)  # allow mixer to settle
+        if not pygame.mixer.music.get_busy():
+            return
+        global music_visualizer_active
+        music_visualizer_active = True
+        threading.Thread(
+            target=music_visualizer_thread,
+            args=(chosen_song,),
+            daemon=True,
+            name="VisualizerThread"
+        ).start()
+
+    threading.Thread(target=start_visualizer_later, daemon=True).start()
 
     # --- Update current_index ---
     try:
@@ -267,7 +303,8 @@ def play_song(user_input=None):
     except ValueError:
         current_index = 0
 
-    return f"Playing: {os.path.splitext(os.path.basename(chosen_song))[0]}"
+    return f"{os.path.splitext(os.path.basename(chosen_song))[0]}"
+
 
 def stop_music():
     global music_visualizer_active, bar_heights
@@ -275,14 +312,14 @@ def stop_music():
     pygame.mixer.music.stop()
     bar_heights[:] = 0
     clear_display()
-    return "Stopped music."
+    return "Music stopped."
 
 def pause_music():
     global music_paused
     if pygame.mixer.music.get_busy():
         pygame.mixer.music.pause()
         music_paused = True
-        return "Paused music."
+        return "Music paused."
     return "Nothing playing."
 
 def resume_music():
@@ -300,11 +337,18 @@ def resume_music():
 
 
 def music_visualizer_thread(song_file):
-    global bar_heights, cached_samples
+    global bar_heights, cached_samples, cached_path
     try:
-        if cached_samples is None:
+        for _ in range(20):
+            if cached_path == song_file and cached_samples is not None:
+                break
+            time.sleep(0.1)
+
+        if cached_samples is None or cached_path != song_file:
             sound = pygame.mixer.Sound(song_file)
             cached_samples = pygame.sndarray.array(sound).mean(axis=1)
+            cached_path = song_file
+
         samples = cached_samples
         total_len = len(samples)
         chunk_size = max(1, total_len // 5000)
@@ -341,12 +385,6 @@ def music_visualizer_thread(song_file):
 # --- Flask Web UI ---
 app = Flask(__name__)
 
-# --- SILENCE ACCESS LOGS ---
-#import logging
-#log = logging.getLogger('werkzeug')
-#log.setLevel(logging.ERROR)
-# ---------------------------
-
 @app.route("/")
 def index():
     return render_template("music.html")
@@ -372,18 +410,24 @@ def next_song():
     global current_index
     music_files, _ = get_music_library()
     if not music_files:
-        return "No songs found."
+        return jsonify(success=False, message="No songs found.")
     current_index = (current_index + 1) % len(music_files)
-    return play_song(os.path.basename(music_files[current_index]))
+    filename = os.path.basename(music_files[current_index])
+    name, _ = os.path.splitext(filename)
+    play_song(filename)
+    return jsonify(success=True, filename=filename, message=f"{name}")
 
 @app.route("/prev")
 def prev_song():
     global current_index
     music_files, _ = get_music_library()
     if not music_files:
-        return "No songs found."
+        return jsonify(success=False, message="No songs found.")
     current_index = (current_index - 1) % len(music_files)
-    return play_song(os.path.basename(music_files[current_index]))
+    filename = os.path.basename(music_files[current_index])
+    name, _ = os.path.splitext(filename)
+    play_song(filename)
+    return jsonify(success=True, filename=filename, message=f"{name}")
 
 @app.route("/library")
 def list_songs():
@@ -395,13 +439,11 @@ def list_songs():
     html += "<p><a href='/'>⬅️ Back</a></p>"
     return html
 
-
-
 @app.route("/library_json")
 def library_json():
     songs = []
     os.makedirs(COVERS_DIR, exist_ok=True)
-    os.makedirs(MUSIC_DIR, exist_ok=True)  # Ensure Music folder exists
+    os.makedirs(MUSIC_DIR, exist_ok=True)
 
     if not hasattr(app, "cover_cache"):
         app.cover_cache = set()
@@ -473,7 +515,6 @@ def library_json():
             "art": art
         })
 
-    # Return normal song list
     return jsonify({"empty": False, "songs": songs})
 
 @app.route("/status")
@@ -482,16 +523,38 @@ def current_status():
 
     if pygame.mixer.music.get_busy() and current_song_path:
         song_name = os.path.splitext(os.path.basename(current_song_path))[0]
-        return f"Playing: {song_name}"
+        return f"{song_name}"
     elif current_song_path:
         song_name = os.path.splitext(os.path.basename(current_song_path))[0]
-        return f"Paused: {song_name}"
+        return f"Paused"
     else:
-        return "Stopped."
+        return " "
 
 @app.route("/play_song/<filename>")
 def play_specific_song(filename):
     return play_song(filename)
+  
+@app.route("/upload", methods=["POST"])
+def upload_song():
+    if "file" not in request.files:
+        return jsonify({"success": False, "message": "No file part"})
+
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"success": False, "message": "No selected file"})
+
+    if not file.filename.lower().endswith(('.mp3', '.wav', '.flac', '.m4a')):
+        return jsonify({"success": False, "message": "Invalid file type"})
+
+    os.makedirs(MUSIC_DIR, exist_ok=True)
+    save_path = os.path.join(MUSIC_DIR, file.filename)
+    file.save(save_path)
+
+    return jsonify({"success": True, "filename": file.filename})
+  
+@app.route("/audio_mode")
+def audio_mode():
+    return jsonify({"mode": "jack" if jackInput else "usb"})
 
 if __name__ == "__main__":
     clear_display()
