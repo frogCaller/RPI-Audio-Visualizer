@@ -119,12 +119,12 @@ async function refreshStatus() {
     const txt = await res.text();
     document.getElementById('status').innerText = txt;
 }
-// Auto-refresh every 5 seconds
-window.addEventListener('load', () => {
-    loadSongs();
-    refreshStatus();
-});
 
+window.addEventListener('load', async () => {
+  await loadSongs();
+  await refreshStatus();
+  await updatePlayButtonState();
+});
   
 const dropZone = document.getElementById("drop-zone");
 
@@ -171,3 +171,25 @@ window.addEventListener("drop", async (e) => {
     setTimeout(() => loadLibrary(), 300); // small delay for safety
   }
 });
+
+async function updatePlayButtonState() {
+  try {
+    const res = await fetch('/status');
+    const txt = await res.text();
+
+    const btn = document.getElementById("toggle-btn");
+    const icon = btn.querySelector("i");
+
+    if (txt.includes("Playing") || txt.includes("Now playing")) {
+      icon.classList.remove("fa-play");
+      icon.classList.add("fa-pause");
+      isPlaying = true;
+    } else {
+      icon.classList.remove("fa-pause");
+      icon.classList.add("fa-play");
+      isPlaying = false;
+    }
+  } catch (err) {
+    console.warn("Could not update play button state:", err);
+  }
+}
