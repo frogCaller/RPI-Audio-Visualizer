@@ -10,6 +10,7 @@ A music visualizer for Raspberry Pi using a 2.23-inch OLED HAT.
 ## Features
 - **OLED Visualizer**: Real-time bar graph visualization of audio frequencies on the 2.23-inch OLED HAT.
 - **Web UI**: Browse and play songs from a local webui.
+- **Drag & Drop Uploads** – Instantly add new songs by dragging and dropping music files into the web page. 
 - **Audio Playback**: Uses Pygame for playback.
 - **Cover Art**: Automatically fetches and caches album covers.
 
@@ -54,7 +55,14 @@ A music visualizer for Raspberry Pi using a 2.23-inch OLED HAT.
 
 # Usage
 -  By default, the app includes one sample song.
--  To expand your library, add more songs to the Music folder before starting the app.
+-  You can add more songs to the Music/ folder before starting the app
+or simply drag & drop files directly into the web page — they’ll automatically upload into the Music/ folder.
+- For album art to fetch correctly, make sure your files are named like this:
+  ```bash
+  "Song Name - Artist.mp3"
+  "Blinding Lights - The Weeknd.mp3"
+
+**Start the app:**
    ```bash
    python3 start.py
    ```
