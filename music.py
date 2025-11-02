@@ -154,6 +154,23 @@ def clear_display():
     draw.rectangle((0, 0, WIDTH, HEIGHT), outline=0, fill=0)
     buffer()
 
+def init_audio_jack():
+    try:
+        os.environ["SDL_AUDIODRIVER"] = "alsa"
+
+        for card in range(5):
+            try:
+                test_dev = f"plughw:{card},0"
+                pygame.mixer.init(frequency=48000, size=-16, channels=2, buffer=2048, devicename=test_dev)
+                return
+            except Exception as e:
+                continue
+
+        pygame.mixer.init(frequency=48000, size=-16, channels=2, buffer=2048)
+    except Exception as e:
+        os.environ["SDL_AUDIODRIVER"] = "dummy"
+        pygame.mixer.init()
+
 def init_audio():
     try:
         os.environ["SDL_AUDIODRIVER"] = "alsa"
@@ -176,6 +193,7 @@ def init_audio():
         pygame.mixer.init()
         #print("[Running in silent mode (no audio output)]")
 
+#init_audio_jack()
 init_audio()
 
 num_bars = WIDTH // 4
