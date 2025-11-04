@@ -2,9 +2,14 @@
 # ------------------------------------------------------------
 # setup.sh – One-click environment setup for the Music project
 # ------------------------------------------------------------
+# Requirements:
+#   • bash
+#   • python3 + python3-venv (on Debian/Raspbian: sudo apt install python3-venv)
+# ------------------------------------------------------------
 
-set -euo pipefail
+set -euo pipefail   # Exit on error, undefined var, pipe failure
 
+# ---------- Config ----------
 VENV_NAME="Music_env"
 REQUIREMENTS=(
     "pillow"
@@ -19,57 +24,77 @@ REQUIREMENTS=(
     "smbus"
     "spidev"
 )
+# ----------------------------
 
-# ---- Color helpers ----
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+# Helper colours
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
 log()   { echo -e "${GREEN}[INFO]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 
-# ---- Ensure apt and sudo available ----
-if ! command -v apt-get >/dev/null; then
-    error "This script currently supports apt-based systems (Ubuntu/Debian)."
-fi
+# ---------- 1. Check prerequisites ----------
+command -v python3 >/dev/null || error "python3 not found – install Python 3 first."
+command -v pip3    >/dev/null || warn "pip3 not found – will try to use pip from python."
 
-# ---- Basic tools check ----
-log "Checking required system tools..."
-sudo apt-get update -y
-sudo apt-get install -y python3 python3-venv python3-pip build-essential
-
-# ---- Create venv ----
-if [ ! -d "$VENV_NAME" ]; then
-    log "Creating virtual environment: $VENV_NAME"
-    python3 -m venv "$VENV_NAME"
+# ---------- 1.5. System update ----------
+if command -v apt-get >/dev/null; then
+    log "Updating system packages (sudo apt update)..."
+    sudo apt update -y || warn "System update failed — continuing anyway."
 else
-    log "Reusing existing venv: $VENV_NAME"
+    warn "apt-get not found — skipping system update."
 fi
 
-source "$VENV_NAME/bin/activate"
+# ---------- 2. Create virtual environment ----------
+if [ -d "$VENV_NAME" ]; then
+    log "Virtual environment '$VENV_NAME' already exists – will reuse it."
+else
+    log "Creating virtual environment '$VENV_NAME' ..."
+    python3 -m venv "$VENV_NAME" || error "Failed to create venv. Install python3-venv (apt install python3-venv)."
+fi
 
-# ---- Upgrade pip ----
+# Activate it (source the script)
+# shellcheck source=/dev/null
+source "${VENV_NAME}/bin/activate" || error "Could not activate venv."
+
+# ---------- 3. Upgrade pip ----------
 log "Upgrading pip..."
 pip install --upgrade pip setuptools wheel
 
-# ---- Install Python deps ----
-log "Installing project dependencies..."
-pip install "${REQUIREMENTS[@]}" || warn "Some Python modules failed; continuing."
+# ---------- 4. Install Python packages ----------
+"${VENV_NAME}/bin/pip" install "${REQUIREMENTS[@]}"
 
-# ---- Try installing GPIO support only if on a Pi ----
-if grep -qi "raspberry" /proc/cpuinfo 2>/dev/null; then
-    log "Detected Raspberry Pi — installing GPIO tools..."
-    sudo apt-get install -y python3-lgpio python3-pigpio pigpio
-else
-    warn "Not a Raspberry Pi — skipping GPIO system packages."
+# ---------- 5. Optional: system packages for lgpio/pigpio ----------
+# (Only needed on Raspberry Pi / Debian-based systems)
+if command -v apt-get >/dev/null; then
+    if command -v sudo >/dev/null; then
+        log "Detected Debian-based system – installing system packages..."
+        sudo apt-get update
+        sudo apt-get install -y python3-lgpio python3-pigpio pigpio || warn "System packages failed (non-critical)."
+    else
+        warn "'sudo' not found – skipping system package installs."
+    fi
 fi
 
-# ---- Verify installs ----
-log "Verifying Python imports..."
+# ---------- 6. Verify installation ----------
+log "Verifying installed packages..."
 for pkg in "${REQUIREMENTS[@]}"; do
-    mod=$(echo "$pkg" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
-    [ "$mod" = "pillow" ] && mod="PIL"
-    python -c "import ${mod}" 2>/dev/null && echo "✓ $pkg" || warn "⚠️  $pkg failed to import"
+    # Convert to lowercase and replace hyphens
+    modname=$(echo "$pkg" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
+
+    # Handle special cases
+    case "$modname" in
+        pillow) modname="PIL" ;;
+        *) ;;
+    esac
+
+    python -c "import ${modname}; print('${pkg} OK')" 2>/dev/null || error "Failed to import $pkg"
 done
 
+# ---------- 7. Final instructions ----------
 log "Setup complete!"
 echo
 echo "• Virtual env. created:                  ${VENV_NAME}/"
@@ -78,3 +103,8 @@ echo "• To start the app:                 python music.py"
 echo
 echo "💡 Tip: You can run 'python start.py' — it will automatically"
 echo "        activate the environment and launch music.py for you."
+
+# Keep the terminal open if the script was double-clicked
+if [[ -t 1 ]]; then
+    exec "${SHELL:-/bin/bash}"
+fi
