@@ -4,10 +4,10 @@
 # ------------------------------------------------------------
 # Requirements:
 #   • bash
-#   • python3 + python3-venv (on Debian/Raspbian: sudo apt install python3-venv)
+#   • sudo privileges (for system packages)
 # ------------------------------------------------------------
 
-set -euo pipefail   # Exit on error, undefined var, pipe failure
+set -euo pipefail  
 
 # ---------- Config ----------
 VENV_NAME="Music_env"
@@ -40,71 +40,66 @@ error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 command -v python3 >/dev/null || error "python3 not found – install Python 3 first."
 command -v pip3    >/dev/null || warn "pip3 not found – will try to use pip from python."
 
-# ---------- 1.5. System update ----------
+# ---------- 1.5. System update & essentials ----------
 if command -v apt-get >/dev/null; then
-    log "Updating system packages (sudo apt update)..."
-    sudo apt update -y || warn "System update failed — continuing anyway."
+    log "Updating system package lists..."
+    sudo apt-get update -y || warn "System update failed — continuing anyway."
+
+    log "Installing core build dependencies..."
+    sudo apt-get install -y python3-dev python3-pip python3-venv build-essential || \
+        error "Failed to install Python build dependencies."
 else
-    warn "apt-get not found — skipping system update."
+    warn "apt-get not found — skipping system dependency install."
 fi
 
 # ---------- 2. Create virtual environment ----------
 if [ -d "$VENV_NAME" ]; then
-    log "Virtual environment '$VENV_NAME' already exists – will reuse it."
+    log "Virtual environment '$VENV_NAME' already exists – reusing it."
 else
     log "Creating virtual environment '$VENV_NAME' ..."
-    python3 -m venv "$VENV_NAME" || error "Failed to create venv. Install python3-venv (apt install python3-venv)."
+    python3 -m venv "$VENV_NAME" || error "Failed to create venv. Try reinstalling python3-venv."
 fi
 
-# Activate it (source the script)
-# shellcheck source=/dev/null
 source "${VENV_NAME}/bin/activate" || error "Could not activate venv."
 
 # ---------- 3. Upgrade pip ----------
-log "Upgrading pip..."
+log "Upgrading pip, setuptools, and wheel..."
 pip install --upgrade pip setuptools wheel
 
 # ---------- 4. Install Python packages ----------
-"${VENV_NAME}/bin/pip" install "${REQUIREMENTS[@]}"
+log "Installing Python dependencies inside venv..."
+pip install "${REQUIREMENTS[@]}"
 
-# ---------- 5. Optional: system packages for lgpio/pigpio ----------
-# (Only needed on Raspberry Pi / Debian-based systems)
+# ---------- 5. Optional: system packages for GPIO ----------
 if command -v apt-get >/dev/null; then
     if command -v sudo >/dev/null; then
-        log "Detected Debian-based system – installing system packages..."
-        sudo apt-get update
-        sudo apt-get install -y python3-lgpio python3-pigpio pigpio || warn "System packages failed (non-critical)."
+        log "Installing optional system packages (lgpio/pigpio)..."
+        sudo apt-get install -y python3-lgpio python3-pigpio pigpio || warn "Optional GPIO packages failed (non-critical)."
     else
-        warn "'sudo' not found – skipping system package installs."
+        warn "'sudo' not found – skipping optional GPIO installs."
     fi
 fi
 
 # ---------- 6. Verify installation ----------
 log "Verifying installed packages..."
 for pkg in "${REQUIREMENTS[@]}"; do
-    # Convert to lowercase and replace hyphens
     modname=$(echo "$pkg" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
-
-    # Handle special cases
     case "$modname" in
         pillow) modname="PIL" ;;
-        *) ;;
     esac
-
     python -c "import ${modname}; print('${pkg} OK')" 2>/dev/null || error "Failed to import $pkg"
 done
 
 # ---------- 7. Final instructions ----------
 log "Setup complete!"
 echo
-echo "• Virtual env. created:                  ${VENV_NAME}/"
-echo "• To activate it:     source ${VENV_NAME}/bin/activate"
-echo "• To start the app:                 python music.py"
+echo "• Virtual env:       ${VENV_NAME}/"
+echo "• Activate with:     source ${VENV_NAME}/bin/activate"
+echo "• Start the app:     python music.py"
 echo
-echo "💡 Tip: You can run 'python start.py' — it will automatically"
-echo "        activate the environment and launch music.py for you."
+echo "Tip: You can also run 'python start.py' to auto-activate and launch."
 
-# Keep the terminal open if the script was double-clicked
+# Keep the terminal open if script was double-clicked
 if [[ -t 1 ]]; then
     exec "${SHELL:-/bin/bash}"
 fi
