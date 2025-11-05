@@ -97,7 +97,7 @@ echo "• Virtual env:       ${VENV_NAME}/"
 echo "• Activate with:     source ${VENV_NAME}/bin/activate"
 echo "• Start the app:     python music.py"
 echo
-echo "Tip: You can also run 'python start.py' to auto-activate and launch."
+echo "Tip: You can also run 'python3 start.py' to auto-activate and launch."
 
 # Keep the terminal open if script was double-clicked
 if [[ -t 1 ]]; then
