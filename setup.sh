@@ -23,6 +23,7 @@ REQUIREMENTS=(
     "numpy"
     "smbus"
     "spidev"
+    "pyyaml"
 )
 # ----------------------------
 
