@@ -21,7 +21,6 @@ A music visualizer for Raspberry Pi using a 2.23-inch OLED HAT.
 * [2.23inch OLED HAT](https://amzn.to/3V2gCKb)<br />
 * [UPS Hat (C)](https://amzn.to/4oGmKnB)<br />
 * [Mini Speaker](https://amzn.to/43DTbL4)<br />
-* [Cable adapter](https://amzn.to/479eGpn)<br />
 
 (Amazon affiliate links)<br />
 
@@ -53,6 +52,15 @@ A music visualizer for Raspberry Pi using a 2.23-inch OLED HAT.
    ```bash
    chmod +x setup.sh
    ./setup.sh
+
+6. **Configure audio input**
+
+   - Edit `config.yaml` to set audio input.
+    
+   ```yaml
+   audio:
+     jackInput: false  # false = use JACK input
+   
 
 # Usage
 -  By default, the app includes one sample song.
