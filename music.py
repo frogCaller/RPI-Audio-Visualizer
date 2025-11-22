@@ -9,6 +9,7 @@ import requests
 from mutagen import File
 from queue import Queue
 import re
+import yaml
 
 # --- OLED Setup ---
 disp = SSD1305.SSD1305()
@@ -25,6 +26,19 @@ MUSIC_DIR = 'Music'
 os.makedirs(MUSIC_DIR, exist_ok=True)
 COVERS_DIR = 'static/covers'
 DEFAULT_COVER = '/static/covers/default_art.png'
+
+
+def load_config(path="config.yaml"):
+    try:
+        with open(path, "r") as f:
+            return yaml.safe_load(f)
+    except FileNotFoundError:
+        print("⚠️ config.yaml not found — using defaults")
+        return {"audio": {"jackInput": False}}
+      
+config = load_config()
+
+jackInput = config.get("audio", {}).get("jackInput", False)
 
 def safe_filename(name):
     return re.sub(r'[^A-Za-z0-9._-]+', '_', name)
@@ -154,9 +168,7 @@ def buffer():
 def clear_display():
     draw.rectangle((0, 0, WIDTH, HEIGHT), outline=0, fill=0)
     buffer()
-    
-    
-jackInput = False
+
     
 def init_audio_jack():
     try:
@@ -339,7 +351,7 @@ def resume_music():
 def music_visualizer_thread(song_file):
     global bar_heights, cached_samples, cached_path
     try:
-        for _ in range(20):
+        for _ in range(20):  # up to ~2s
             if cached_path == song_file and cached_samples is not None:
                 break
             time.sleep(0.1)
@@ -443,7 +455,7 @@ def list_songs():
 def library_json():
     songs = []
     os.makedirs(COVERS_DIR, exist_ok=True)
-    os.makedirs(MUSIC_DIR, exist_ok=True)
+    os.makedirs(MUSIC_DIR, exist_ok=True)  # Ensure Music folder exists
 
     if not hasattr(app, "cover_cache"):
         app.cover_cache = set()
@@ -515,13 +527,19 @@ def library_json():
             "art": art
         })
 
+    # Return normal song list
     return jsonify({"empty": False, "songs": songs})
 
 @app.route("/status")
 def current_status():
     global current_song_path
 
-    if pygame.mixer.music.get_busy() and current_song_path:
+    try:
+        busy = pygame.mixer.get_init() and pygame.mixer.music.get_busy()
+    except pygame.error:
+        busy = False
+    
+    if busy and current_song_path:
         song_name = os.path.splitext(os.path.basename(current_song_path))[0]
         return f"{song_name}"
     elif current_song_path:
@@ -550,13 +568,44 @@ def upload_song():
     save_path = os.path.join(MUSIC_DIR, file.filename)
     file.save(save_path)
 
+    #print(f"[Uploaded new song: {file.filename}]")
     return jsonify({"success": True, "filename": file.filename})
   
 @app.route("/audio_mode")
 def audio_mode():
     return jsonify({"mode": "jack" if jackInput else "usb"})
+  
+def preload_all_covers():
+    print("[Preloading album covers before startup...]")
+
+    songs = build_library_json()
+    total = len(songs)
+    cached = 0
+    fetched = 0
+
+    for s in songs:
+        art = s.get("art")
+        if art and art != DEFAULT_COVER:
+            cached += 1
+            continue
+
+        if os.uname().machine not in ("armv7l", "aarch64"):
+            continue
+
+        artist, title, filename = s["artist"], s["title"], s["filename"]
+        path = os.path.join(MUSIC_DIR, filename)
+        try:
+            ensure_cover_for_song(path, artist, title, filename)
+            fetched += 1
+        except Exception as e:
+            print(f"[Cover preload error for {filename}: {e}]")
+
+        time.sleep(0.05)
+
+    print(f"[Cached {cached} / Fetched {fetched} / Total {total}]")
 
 if __name__ == "__main__":
     clear_display()
+    preload_all_covers()
     print("Music visualizer server running on http://0.0.0.0:5000")
     app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
