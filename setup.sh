@@ -87,6 +87,7 @@ for pkg in "${REQUIREMENTS[@]}"; do
     modname=$(echo "$pkg" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
     case "$modname" in
         pillow) modname="PIL" ;;
+        pyyaml) modname="yaml" ;;
     esac
     python -c "import ${modname}; print('${pkg} OK')" 2>/dev/null || error "Failed to import $pkg"
 done
