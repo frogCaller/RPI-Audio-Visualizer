@@ -1,6 +1,7 @@
 #coding=utf-8
 from . import config
 import time
+import numpy as np
 
 Device_SPI = config.Device_SPI
 Device_I2C = config.Device_I2C
@@ -93,42 +94,31 @@ class SSD1305(object):
         if imwidth != self.width or imheight != self.height:
             raise ValueError('Image must be same dimensions as display ({0}x{1}).' \
                 .format(self.width, self.height))
-        # Grab all the pixels from the image, faster than getpixel.
-        pix = image.load()
-        # Iterate through the memory pages
-        index = 0
-        for page in range(self._pages):
-            # Iterate through all x axis columns.
-            for x in range(self.width):
-                # Set the bits for the column of pixels at the current position.
-                bits = 0
-                # Don't use range here as it's a bit slow
-                for bit in [0, 1, 2, 3, 4, 5, 6, 7]:
-                    bits = bits << 1
-                    bits |= 0 if pix[(x, page*8+7-bit)] == 0 else 1
-                # Update buffer byte and increment to next byte.
-                self._buffer[index] = bits
-                index += 1
+        # Pack all pixels at once with numpy instead of looping pixel by pixel.
+        # Each byte is one column of 8 rows in a page; row page*8 is bit 0.
+        pix = np.asarray(image, dtype=np.uint8)
+        pages = pix.reshape(self._pages, 8, self.width)
+        self._buffer = np.packbits(pages, axis=1, bitorder='little').tobytes()
 
 
     def ShowImage(self):
+        w = self.width
         for page in range(0,self._pages):
-            # set page address #
-            self.command(0xB0 + page)
-            # set low column address #
-            self.command(0x04);
-            # set high column address #
-            self.command(0x10);
-            # write data #
-            # time.sleep(0.01)
+            row = list(self._buffer[page*w:(page+1)*w])
             if(self.Device == Device_SPI):
+                # page address + column address as one command burst
+                self.RPI.digital_write(self._dc,False)
+                self.RPI.spi_writebytes([0xB0 + page, 0x04, 0x10])
+                # whole page of data in one transfer
                 self.RPI.digital_write(self._dc,True)
-            for i in range(0,self.width):
-                if(self.Device == Device_SPI):
-                    # self.RPI.digital_write(self._dc,True)
-                    self.RPI.spi_writebyte([self._buffer[i+self.width*page]]);
-                else :
-                    self.RPI.i2c_writebyte(0x40, self._buffer[i+self.width*page])
+                self.RPI.spi_writebytes(row)
+            else :
+                self.command(0xB0 + page)
+                self.command(0x04)
+                self.command(0x10)
+                # I2C block writes are limited to 32 bytes
+                for i in range(0, w, 32):
+                    self.RPI.i2c_writeblock(0x40, row[i:i+32])
 
     def clear(self):
         """Clear contents of image buffer"""
