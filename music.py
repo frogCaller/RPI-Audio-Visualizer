@@ -1,5 +1,6 @@
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, Response
 from PIL import Image, ImageDraw
+import base64
 from drive import SSD1305
 import numpy as np
 import os
@@ -32,6 +33,10 @@ samples_lock = threading.Lock()
 mixer_lock = threading.Lock()
 last_frame = None
 play_gen = 0
+frame_cond = threading.Condition()
+frame_seq = 0
+music_volume = 1.0
+song_lengths = {}
 
 
 def load_config(path="config.yaml"):
@@ -168,7 +173,7 @@ def build_library_json():
     return songs
 
 def buffer(force=False):
-    global last_frame
+    global last_frame, frame_seq
     with display_lock:
         disp.getbuffer(image)
         frame = bytes(disp._buffer)
@@ -176,6 +181,9 @@ def buffer(force=False):
         if force or frame != last_frame:
             disp.ShowImage()
             last_frame = frame
+            with frame_cond:
+                frame_seq += 1
+                frame_cond.notify_all()
 
 def clear_display():
     with display_lock:
@@ -295,6 +303,8 @@ def get_music_library():
     music_files = []
     for ext in ("*.mp3", "*.wav", "*.m4a", "*.flac"):
         music_files.extend(glob.glob(os.path.join(MUSIC_DIR, ext)))
+    # same order as the web page grid, so next/prev go to the neighbouring song
+    music_files.sort(key=lambda p: os.path.basename(p).lower())
     normalized_index = {normalize(os.path.splitext(os.path.basename(f))[0]): f for f in music_files}
     print(f"[Loaded {len(music_files)} songs]")
     return music_files, normalized_index
@@ -303,12 +313,13 @@ visualizer_thread = None
 
 def play_song(user_input=None):
     global music_visualizer_active, bar_heights, current_index, current_song_path
-    global play_gen
+    global play_gen, music_paused
 
     # --- Gracefully stop any current playback ---
     play_gen += 1
     gen = play_gen
     music_visualizer_active = False
+    music_paused = False
     try:
         if pygame.mixer.music.get_busy():
             pygame.mixer.music.fadeout(200)
@@ -345,6 +356,7 @@ def play_song(user_input=None):
                     return  # another song was picked while waiting
                 pygame.mixer.music.load(chosen_song)
                 pygame.mixer.music.play()
+                pygame.mixer.music.set_volume(music_volume)
             print(f"{os.path.basename(chosen_song)}")
         except Exception as e:
             print(f"[Audio playback error: {e}]")
@@ -411,6 +423,7 @@ def music_visualizer_thread(song_file, gen=None):
     if gen is None:
         gen = play_gen
     try:
+        # waits for the background decode instead of decoding a second copy
         samples = get_levels(song_file, gen)
         if samples is None:
             return
@@ -430,8 +443,10 @@ def music_visualizer_thread(song_file, gen=None):
                 time.sleep(FRAME_TIME)
                 continue
 
+            # all bars in one numpy call
             new_heights = chunk[:chunk_len * num_bars].reshape(num_bars, chunk_len).mean(axis=1) / 65536.0
 
+            # same fall per frame as before, kept steady if a frame runs late
             now = time.monotonic()
             fall = decay ** ((now - last) / FRAME_TIME)
             last = now
@@ -440,6 +455,7 @@ def music_visualizer_thread(song_file, gen=None):
             with display_lock:
                 if gen != play_gen or not music_visualizer_active:
                     break
+                # clear the image only; the OLED gets one frame, not a blank one first
                 draw.rectangle((0, 0, WIDTH, HEIGHT), outline=0, fill=0)
                 for i, h in enumerate(bar_heights):
                     bar_h = int(h * HEIGHT * 1.5)
@@ -449,6 +465,7 @@ def music_visualizer_thread(song_file, gen=None):
                     #draw.rectangle([x, 0, x + bar_width - 1, bar_h], fill=255)
                 buffer()
 
+            # steady frame rate: sleep only what's left of this frame
             next_frame += FRAME_TIME
             wait = next_frame - time.monotonic()
             if wait > 0:
@@ -519,17 +536,18 @@ def list_songs():
 def library_json():
     songs = []
     os.makedirs(COVERS_DIR, exist_ok=True)
-    os.makedirs(MUSIC_DIR, exist_ok=True)
+    os.makedirs(MUSIC_DIR, exist_ok=True)  # Ensure Music folder exists
 
     if not hasattr(app, "cover_cache"):
         app.cover_cache = set()
     if not hasattr(app, "cover_failed"):
         app.cover_failed = set()
 
-    valid_files = [
+    # Get all valid audio files
+    valid_files = sorted((
         f for f in os.listdir(MUSIC_DIR)
         if f.lower().endswith(('.mp3', '.wav', '.flac', '.m4a'))
-    ]
+    ), key=str.lower)
 
     # ---If no songs found, show friendly message ---
     if not valid_files:
@@ -585,7 +603,7 @@ def library_json():
 
         songs.append({
             "filename": fname,
-            "title": title[:30] + ("…" if len(title) > 30 else ""),
+            "title": title,  # the page shortens long titles itself
             "artist": artist,
             "art": art
         })
@@ -628,15 +646,88 @@ def upload_song():
         return jsonify({"success": False, "message": "Invalid file type"})
 
     os.makedirs(MUSIC_DIR, exist_ok=True)
-    save_path = os.path.join(MUSIC_DIR, file.filename)
+    filename = os.path.basename(file.filename)  # keep uploads inside Music/
+    save_path = os.path.join(MUSIC_DIR, filename)
     file.save(save_path)
+    get_music_library.cache_clear()  # so the new song can be played right away
 
-    #print(f"[Uploaded new song: {file.filename}]")
-    return jsonify({"success": True, "filename": file.filename})
-  
+    #print(f"[Uploaded new song: {filename}]")
+    return jsonify({"success": True, "filename": filename})
+
 @app.route("/audio_mode")
 def audio_mode():
     return jsonify({"mode": "jack" if jackInput else "usb"})
+
+
+def song_length(path):
+    if path not in song_lengths:
+        try:
+            audio = File(path)  # note: a file with no tags is falsy, so test for None
+            info = getattr(audio, "info", None) if audio is not None else None
+            song_lengths[path] = float(info.length) if info and info.length else 0.0
+        except Exception:
+            song_lengths[path] = 0.0
+    return song_lengths[path]
+
+
+@app.route("/state")
+def player_state():
+    """What the web page shows: playing/paused/stopped, song, position, volume."""
+    path = current_song_path
+    try:
+        busy = bool(pygame.mixer.get_init()) and pygame.mixer.music.get_busy()
+        pos_ms = pygame.mixer.music.get_pos() if path else -1
+    except pygame.error:
+        busy, pos_ms = False, -1
+
+    if busy:
+        state = "playing"
+    elif path and music_paused:
+        state = "paused"
+    else:
+        state = "stopped"
+
+    return jsonify({
+        "state": state,
+        "filename": os.path.basename(path) if path else None,
+        "position": max(0, pos_ms) / 1000 if state != "stopped" else 0,
+        "length": song_length(path) if path else 0,
+        "volume": round(music_volume, 2),
+    })
+
+
+@app.route("/volume")
+def set_volume():
+    global music_volume
+    level = request.args.get("level", type=float)
+    if level is not None:
+        music_volume = max(0.0, min(1.0, level))
+        try:
+            pygame.mixer.music.set_volume(music_volume)
+        except pygame.error:
+            pass
+    return jsonify({"volume": round(music_volume, 2)})
+
+
+@app.route("/screen")
+def screen_stream():
+    """Live copy of the OLED for the web page (server-sent events).
+    Sends each new frame as base64; nothing is sent while the screen is still."""
+    def frames():
+        seen = None
+        while True:
+            with frame_cond:
+                if seen == frame_seq:
+                    frame_cond.wait(timeout=15)
+                changed = seen != frame_seq
+                seen = frame_seq
+                frame = last_frame
+            if changed and frame is not None:
+                yield "data: " + base64.b64encode(frame).decode() + "\n\n"
+            else:
+                yield ": still here\n\n"  # keep-alive, also lets closed tabs drop off
+    return Response(frames(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
   
 def preload_all_covers():
     print("[Preloading album covers before startup...]")
@@ -671,4 +762,4 @@ if __name__ == "__main__":
     clear_display()
     preload_all_covers()
     print("Music visualizer server running on http://0.0.0.0:5000")
-    app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
+    app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False, threaded=True)
