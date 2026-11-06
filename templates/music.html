@@ -2,44 +2,124 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.6.0/css/all.min.css">
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0F1F1A">
   <title>RPi Music</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230F1F1A'/%3E%3Cpath fill='%23D7B75A' d='M7 17h4v9H7zM14 7h4v19h-4zM21 13h4v13h-4z'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Chakra+Petch:wght@600&display=swap">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
 
-<header>
+<header class="top">
   <h1>RPi Music</h1>
+  <button class="pill" id="add-btn" type="button">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    Add songs
+  </button>
+  <input type="file" id="file-input" accept=".mp3,.wav,.flac,.m4a" multiple hidden>
 </header>
 
-<main>
-  <p id="empty-message" style="text-align:center; color:gray; font-style:italic; display:none;">
-    No music found. Please add songs to the <b>Music/</b> folder.
-  </p>
+<div class="layout">
 
-  <div class="grid" id="song-grid">
-    <!-- Filled by JS -->
-  </div>
-</main>
+  <section class="player" id="player" aria-label="Now playing">
+    <div class="screen">
+      <canvas id="screen" width="512" height="128" role="img" aria-label="Live view of the Pi's screen"></canvas>
+    </div>
 
-<!-- Drag & Drop overlay -->
-<div id="drop-zone"></div>
-  
-  <div class="controls">
-    <button class="btn" onclick="send('/play')"><i class="fa-solid fa-music"></i></button>
-    <button class="btn" id="toggle-btn" onclick="togglePlayPause()">
-      <i class="fa-solid fa-play"></i>
-    </button>
-    <!-- <button class="btn" onclick="send('/stop')"><i class="fa-solid fa-stop"></i></button> -->
-    <button class="btn" onclick="prevSong()"><i class="fa-solid fa-backward-step"></i></button>
-    <button class="btn" onclick="nextSong()"><i class="fa-solid fa-forward-step"></i></button>
-    
-    <button class="btn" onclick="document.getElementById('file-input').click()"><i class="fa-solid fa-upload"></i></button>
-    <input type="file" id="file-input" accept=".mp3,.wav,.flac,.m4a" multiple style="display:none;">
+    <div class="now">
+      <span class="now-art" id="now-art"></span>
+      <div class="now-text">
+        <p class="now-title" id="now-title">Nothing playing</p>
+        <p class="now-artist" id="now-artist">Pick a song to start</p>
+      </div>
+    </div>
+
+    <div class="progress" aria-hidden="true">
+      <span id="time-pos">0:00</span>
+      <span class="bar"><span class="bar-fill" id="bar-fill"></span></span>
+      <span id="time-len">0:00</span>
+    </div>
+
+    <div class="transport">
+      <button class="ctl" id="prev-btn" type="button" aria-label="Previous song" title="Previous song">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="2.6" height="14" rx="1"/><path d="M19 6.2v11.6a1 1 0 0 1-1.55.83l-8.6-5.8a1 1 0 0 1 0-1.66l8.6-5.8A1 1 0 0 1 19 6.2z"/></svg>
+      </button>
+      <button class="ctl play" id="play-btn" type="button" aria-label="Play" title="Play">
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="i-play"><path d="M8 5.7v12.6a1 1 0 0 0 1.53.85l10-6.3a1 1 0 0 0 0-1.7l-10-6.3A1 1 0 0 0 8 5.7z"/></svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="i-pause"><rect x="6.5" y="5" width="4" height="14" rx="1"/><rect x="13.5" y="5" width="4" height="14" rx="1"/></svg>
+      </button>
+      <button class="ctl" id="next-btn" type="button" aria-label="Next song" title="Next song">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="16.4" y="5" width="2.6" height="14" rx="1"/><path d="M5 6.2v11.6a1 1 0 0 0 1.55.83l8.6-5.8a1 1 0 0 0 0-1.66l-8.6-5.8A1 1 0 0 0 5 6.2z"/></svg>
+      </button>
+    </div>
+
+    <div class="extras">
+      <button class="pill" id="shuffle-btn" type="button" title="Play a random song">
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h2.5c2 0 3.2 1 4.2 2.5l2.6 5c1 1.5 2.2 2.5 4.2 2.5H20M4 17h2.5c1.3 0 2.3-.4 3.1-1.1M13.3 8.1c.8-.7 1.8-1.1 3.2-1.1H20M17 4l3 3-3 3M17 14l3 3-3 3"/></svg>
+        Random song
+      </button>
+      <label class="volume" title="Volume">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5h3l4.5-3.8v12.6L7 14.5H4z" fill="currentColor"/><path d="M15 9.2a4 4 0 0 1 0 5.6M17.6 6.6a7.6 7.6 0 0 1 0 10.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <input type="range" id="volume" min="0" max="100" value="100" aria-label="Volume">
+      </label>
+    </div>
+  </section>
+
+  <section class="library" aria-label="Library">
+    <div class="library-bar">
+      <label class="search">
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg>
+        <input type="search" id="search" placeholder="Search songs or artists" aria-label="Search songs or artists" autocomplete="off">
+      </label>
+      <span class="count" id="count"></span>
+    </div>
+
+    <div class="grid" id="grid"></div>
+
+    <div class="empty" id="empty-library" hidden>
+      <h2>No songs yet</h2>
+      <p>Add MP3, WAV, FLAC or M4A files, or drop them anywhere on this page. Name them like "Song - Artist.mp3" so cover art can be found.</p>
+      <button class="pill" id="empty-add-btn" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        Add songs
+      </button>
+    </div>
+
+    <div class="empty" id="empty-search" hidden>
+      <h2 id="empty-search-title">No matches</h2>
+      <p>Try part of a title or an artist's name.</p>
+      <button class="pill" id="clear-search-btn" type="button">Clear search</button>
+    </div>
+  </section>
+</div>
+
+<div class="mini" id="mini" hidden>
+  <span class="mini-bar" id="mini-bar"></span>
+  <span class="mini-art" id="mini-art"></span>
+  <button class="mini-text" id="mini-text" type="button" aria-label="Show player">
+    <span class="mini-title" id="mini-title"></span>
+    <span class="mini-artist" id="mini-artist"></span>
+  </button>
+  <button class="ctl play" id="mini-play" type="button" aria-label="Play">
+    <svg viewBox="0 0 24 24" aria-hidden="true" class="i-play"><path d="M8 5.7v12.6a1 1 0 0 0 1.53.85l10-6.3a1 1 0 0 0 0-1.7l-10-6.3A1 1 0 0 0 8 5.7z"/></svg>
+    <svg viewBox="0 0 24 24" aria-hidden="true" class="i-pause"><rect x="6.5" y="5" width="4" height="14" rx="1"/><rect x="13.5" y="5" width="4" height="14" rx="1"/></svg>
+  </button>
+  <button class="ctl" id="mini-next" type="button" aria-label="Next song">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="16.4" y="5" width="2.6" height="14" rx="1"/><path d="M5 6.2v11.6a1 1 0 0 0 1.55.83l8.6-5.8a1 1 0 0 0 0-1.66l-8.6-5.8A1 1 0 0 0 5 6.2z"/></svg>
+  </button>
+</div>
+
+<div class="drop" id="drop" hidden>
+  <div class="drop-box">
+    <p class="drop-title">Drop to add to your library</p>
+    <p>MP3, WAV, FLAC or M4A</p>
   </div>
-  
-  <p id="status" style="text-align:center; margin-top:10px;"></p>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script src="{{ url_for('static', filename='visualizer.js') }}"></script>
 </body>
