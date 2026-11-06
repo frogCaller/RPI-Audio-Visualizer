@@ -1,88 +1,65 @@
 # Raspberry Pi Audio Visualizer
 
-<div style="display: flex; gap: 10px;">   
+<div style="display: flex; gap: 10px;">
     <img src="images/visualizer.GIF" width="250">
     <img src="images/visualizer2.GIF" width="250">
 </div>
 
-A music visualizer for Raspberry Pi using a 2.23-inch OLED HAT.
+A small music player for the Raspberry Pi with a 2.23" OLED HAT. Bars on the screen move with the music, and you pick songs from a web page on your phone or computer.
 
 ## Features
-- **OLED Visualizer**: Real-time bar graph visualization of audio frequencies on the 2.23-inch OLED HAT.
-- **Web UI**: Browse and play songs from a local webui.
-- **Drag & Drop Songs** – Instantly add new songs by dragging and dropping music files into the web page. 
-- **Audio Playback**: Uses Pygame for playback.
-- **Cover Art**: Automatically fetches and caches album covers.
+- **OLED visualizer:** bars that follow the music, at a steady 25 fps.
+- **Web page:** play, pause, skip, random song, volume, and search your library.
+- **Live screen view:** the web page shows exactly what's on the OLED.
+- **Add songs from the page:** drag and drop files, or use Add songs.
+- **Cover art:** fetched and saved automatically.
 
-# Materials
-* [Raspberry Pi Zero 2 W](https://amzn.to/4qtC0pm)<br />
-* [Micro SD Cards](https://amzn.to/4erXgWD)<br />
-* [2.23inch OLED HAT](https://amzn.to/3V2gCKb)<br />
-* [UPS Hat (C)](https://amzn.to/4oGmKnB)<br />
-* [Mini Speaker](https://amzn.to/43DTbL4)<br />
+## What you need
+* [Raspberry Pi Zero 2 W](https://amzn.to/4qtC0pm)
+* [Micro SD card](https://amzn.to/4erXgWD)
+* [2.23" OLED HAT](https://amzn.to/3V2gCKb)
+* [UPS HAT (C)](https://amzn.to/4oGmKnB)
+* [Mini speaker](https://amzn.to/43DTbL4)
 
-(Amazon affiliate links)<br />
+(Amazon affiliate links)
 
-1. **Install OS:**
-   - RaspberryPi OS (64-bit) <br />
+## Setup
+1. **Install Raspberry Pi OS (64-bit)** on the SD card.
 
-# Wiring and Setup
-2. **Connect 2.13inch e-Ink HAT to Raspberry Pi:**
-   - Connect the 2.23inch OLED HAT to your Raspberry Pi. <br />
-   - Connect the UPS Hat for continuous power supply. This will allow you to move the project anywhere without worrying about power interruptions.
+2. **Attach the OLED HAT** to the Pi, plus the UPS HAT if you're using one.
 
-3. **Enable SPI & I2C:**
-   - Open a terminal on your Raspberry Pi.
-   - Run `sudo raspi-config`
-   - Navigate to Interfacing Options -> SPI -> Enable.
-   - Navigate to Interfacing Options -> I2C -> Enable.
-  
-4. **Clone the repository:**
+3. **Enable SPI and I2C:** run `sudo raspi-config`, open **Interface Options**, and turn on **SPI** and **I2C**.
+
+4. **Download and install:**
    ```bash
    sudo apt install -y git
    git clone https://github.com/frogCaller/RPI-Audio-Visualizer.git
    cd RPI-Audio-Visualizer
+   sudo bash setup.sh
    ```
+   `setup.sh` creates a Python environment (`Music_env`) and installs everything into it.
 
-5. **Install System and Python Dependencies:**
-
-   - Automatically creates a dedicated Python virtual environment (`Music_env`) and installs the required dependencies.
-    
-   ```bash
-   chmod +x setup.sh
-   ./setup.sh
-
-6. **Configure audio input**
-
-   - Edit `config.yaml` to set audio input.
-    
+5. **Pick your speaker** in `config.yaml`:
    ```yaml
    audio:
-     jackInput: false  # false = use JACK input
-   
-
-# Usage
--  By default, the app includes one sample song.
--  You can add more songs to the Music/ folder before starting the app
-or simply drag & drop files directly into the web page — they’ll automatically upload into the Music/ folder.
-- For album art to fetch correctly, make sure your files are named like this:
-  ```bash
-  "Song Name - Artist.mp3"
-  "Blinding Lights - The Weeknd.mp3"
-
-**Start the app:**
-   ```bash
-   python3 start.py
+     jackInput: false  # false = USB speaker, true = headphone jack (on Pis that have one)
    ```
-   Open a browser and go to:
-   ```bash
-   http://<raspberrypi-IP>:5000
-   ```
-   Replace <raspberrypi-IP> with your Raspberry Pi’s actual IP address (e.i. http://192.168.0.78:5000).
 
-# Troubleshooting
-- Common Issues:
-   - Ensure SPI & I2C are enabled in the Raspberry Pi configuration.
-   - Check all connections if the screen does not display anything.
-   - Verify all required packages are installed correctly.
-   - [More Info](https://www.waveshare.com/wiki/2.23inch_OLED_HAT)
+## Usage
+```bash
+python3 start.py
+```
+Then open `http://<your-pi-ip>:5000` on a phone or computer on the same Wi-Fi. If you don't know the Pi's IP, run `hostname -I`.
+
+**Adding songs:** drop MP3, WAV, FLAC or M4A files onto the page, or copy them into the `Music/` folder. For cover art to be found, name files like `Song Name - Artist.mp3`, for example `Blinding Lights - The Weeknd.mp3`.
+
+**Keyboard shortcuts** (on a computer): Space to play or pause, ← and → for previous and next, / to search.
+
+## Troubleshooting
+- **Screen stays blank:** check that SPI and I2C are on and the HAT is pressed all the way down.
+- **No sound:** check `jackInput` in `config.yaml` matches your speaker, and plug in a USB speaker before starting. If the terminal says it's using silent mode, the Pi couldn't open the speaker.
+- **Page won't load:** make sure your device is on the same network as the Pi and the address ends in `:5000`.
+- More about the screen: [Waveshare 2.23" OLED HAT wiki](https://www.waveshare.com/wiki/2.23inch_OLED_HAT)
+
+---
+Sample song: "Lukewarm Banjo" by Kevin MacLeod, from [FreePD.com](https://freepd.com).
