@@ -111,9 +111,17 @@ class RaspberryPi:
         if self.spi:
             self.spi.writebytes([data[0]])
 
+    def spi_writebytes(self, data):
+        if self.spi:
+            self.spi.writebytes(data)
+
     def i2c_writebyte(self, reg, value):
         if self.bus:
             self.bus.write_byte_data(self.address, reg, value)
+
+    def i2c_writeblock(self, reg, values):
+        if self.bus:
+            self.bus.write_i2c_block_data(self.address, reg, values)
 
     # --- Lifecycle ---
     def module_init(self):
