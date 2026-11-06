@@ -27,6 +27,12 @@ os.makedirs(MUSIC_DIR, exist_ok=True)
 COVERS_DIR = 'static/covers'
 DEFAULT_COVER = '/static/covers/default_art.png'
 
+display_lock = threading.RLock()
+samples_lock = threading.Lock()
+mixer_lock = threading.Lock()
+last_frame = None
+play_gen = 0
+
 
 def load_config(path="config.yaml"):
     try:
@@ -161,13 +167,20 @@ def build_library_json():
             })
     return songs
 
-def buffer():
-    disp.getbuffer(image)
-    disp.ShowImage()
+def buffer(force=False):
+    global last_frame
+    with display_lock:
+        disp.getbuffer(image)
+        frame = bytes(disp._buffer)
+        # skip the SPI/I2C transfer when the picture hasn't changed
+        if force or frame != last_frame:
+            disp.ShowImage()
+            last_frame = frame
 
 def clear_display():
-    draw.rectangle((0, 0, WIDTH, HEIGHT), outline=0, fill=0)
-    buffer()
+    with display_lock:
+        draw.rectangle((0, 0, WIDTH, HEIGHT), outline=0, fill=0)
+        buffer(force=True)
 
     
 def init_audio_jack():
@@ -214,10 +227,64 @@ else:
 
 num_bars = WIDTH // 4
 bar_width = 4
-decay = 0.85
+decay = 0.85          # how much a bar keeps per frame (higher = slower fall)
+FRAME_TIME = 0.04     # seconds per frame (0.04 = 25 fps)
 bar_heights = np.zeros(num_bars)
 music_visualizer_active = False
 music_paused = False
+
+
+def mixer_rate():
+    """Sample rate the mixer is actually running at (44100 USB, 48000 jack)."""
+    try:
+        init = pygame.mixer.get_init()
+        if init:
+            return init[0]
+    except pygame.error:
+        pass
+    return 44100
+
+
+def decode_levels(path):
+    """Decode a song once and keep only what the bars need:
+    |left + right| per sample as uint16 (about 1/4 the RAM of the old float cache)."""
+    # pygame can crash if a Sound decode and music.load() run at the same
+    # time (e.g. skipping songs quickly), so they share a lock
+    with mixer_lock:
+        sound = pygame.mixer.Sound(path)
+        raw = pygame.sndarray.array(sound)
+        del sound
+    n = raw.shape[0]
+    levels = np.empty(n, dtype=np.uint16)
+    step = 1 << 18
+    for s in range(0, n, step):
+        block = raw[s:s + step].astype(np.int32)
+        if block.ndim == 2:
+            block = block.sum(axis=1) * 2 // block.shape[1]
+        else:
+            block = block * 2
+        levels[s:s + step] = np.minimum(np.abs(block), 65535)
+    del raw
+    return levels
+
+
+def get_levels(path, gen):
+    """Cached levels for a song, decoded only once. None if a newer song started."""
+    global cached_samples, cached_path
+    with samples_lock:
+        if cached_path == path and cached_samples is not None:
+            return cached_samples
+        if gen != play_gen:
+            return None
+        cached_samples, cached_path = None, None  # free the previous song first
+        try:
+            levels = decode_levels(path)
+        except Exception as e:
+            print(f"[Warning: failed to cache samples: {e}]")
+            return None
+        cached_samples, cached_path = levels, path
+        print(f"[Cached samples for {os.path.basename(path)}]")
+        return levels
 
 def normalize(s: str) -> str:
     return s.lower().strip().translate(str.maketrans("", "", string.punctuation))
@@ -236,9 +303,11 @@ visualizer_thread = None
 
 def play_song(user_input=None):
     global music_visualizer_active, bar_heights, current_index, current_song_path
-    global cached_samples, cached_path
+    global play_gen
 
     # --- Gracefully stop any current playback ---
+    play_gen += 1
+    gen = play_gen
     music_visualizer_active = False
     try:
         if pygame.mixer.music.get_busy():
@@ -269,45 +338,34 @@ def play_song(user_input=None):
 
     # --- Start playback asynchronously ---
     def start_playback():
+        global music_visualizer_active
         try:
-            pygame.mixer.music.load(chosen_song)
-            pygame.mixer.music.play()
+            with mixer_lock:
+                if gen != play_gen:
+                    return  # another song was picked while waiting
+                pygame.mixer.music.load(chosen_song)
+                pygame.mixer.music.play()
             print(f"{os.path.basename(chosen_song)}")
         except Exception as e:
             print(f"[Audio playback error: {e}]")
-
-    threading.Thread(target=start_playback, daemon=True).start()
-
-    # --- Async waveform cache (background) ---
-    def preload_samples(path):
-        global cached_samples, cached_path
-        try:
-            sound = pygame.mixer.Sound(path)
-            cached_samples = pygame.sndarray.array(sound).mean(axis=1)
-            cached_path = path
-            print(f"[Cached samples for {os.path.basename(path)}]")
-        except Exception as e:
-            cached_samples = None
-            cached_path = None
-            print(f"[Warning: failed to cache samples: {e}]")
-
-    threading.Thread(target=preload_samples, args=(chosen_song,), daemon=True).start()
-
-    # --- Delay visualizer start slightly until audio ready ---
-    def start_visualizer_later():
-        time.sleep(0.4)  # allow mixer to settle
-        if not pygame.mixer.music.get_busy():
             return
-        global music_visualizer_active
+
+        # --- Waveform cache (background), only after playback has started ---
+        threading.Thread(target=get_levels, args=(chosen_song, gen), daemon=True).start()
+
+        # --- Delay visualizer start slightly until audio ready ---
+        time.sleep(0.4)  # allow mixer to settle
+        if gen != play_gen or not pygame.mixer.music.get_busy():
+            return
         music_visualizer_active = True
         threading.Thread(
             target=music_visualizer_thread,
-            args=(chosen_song,),
+            args=(chosen_song, gen),
             daemon=True,
             name="VisualizerThread"
         ).start()
 
-    threading.Thread(target=start_visualizer_later, daemon=True).start()
+    threading.Thread(target=start_playback, daemon=True).start()
 
     # --- Update current_index ---
     try:
@@ -342,55 +400,61 @@ def resume_music():
         music_visualizer_active = True
 
         if not any(t.name == "VisualizerThread" and t.is_alive() for t in threading.enumerate()):
-            threading.Thread(target=music_visualizer_thread, args=(current_song_path,), daemon=True, name="VisualizerThread").start()
+            threading.Thread(target=music_visualizer_thread, args=(current_song_path, play_gen), daemon=True, name="VisualizerThread").start()
 
         return "Resumed music."
     return "Nothing to resume."
 
 
-def music_visualizer_thread(song_file):
-    global bar_heights, cached_samples, cached_path
+def music_visualizer_thread(song_file, gen=None):
+    global bar_heights
+    if gen is None:
+        gen = play_gen
     try:
-        for _ in range(20):  # up to ~2s
-            if cached_path == song_file and cached_samples is not None:
-                break
-            time.sleep(0.1)
+        samples = get_levels(song_file, gen)
+        if samples is None:
+            return
 
-        if cached_samples is None or cached_path != song_file:
-            sound = pygame.mixer.Sound(song_file)
-            cached_samples = pygame.sndarray.array(sound).mean(axis=1)
-            cached_path = song_file
-
-        samples = cached_samples
+        rate = mixer_rate()
         total_len = len(samples)
         chunk_size = max(1, total_len // 5000)
+        last = time.monotonic()
+        next_frame = last
 
-        while music_visualizer_active and pygame.mixer.music.get_busy():
+        while music_visualizer_active and gen == play_gen and pygame.mixer.music.get_busy():
             pos = pygame.mixer.music.get_pos()
-            idx = int(pos / 1000 * 44100)
+            idx = int(pos / 1000 * rate)
             chunk = samples[idx:idx + chunk_size]
-            if len(chunk) == 0:
-                time.sleep(0.04)
+            chunk_len = len(chunk) // num_bars
+            if chunk_len == 0:
+                time.sleep(FRAME_TIME)
                 continue
 
-            new_heights = []
-            chunk_len = len(chunk) // num_bars
-            for i in range(num_bars):
-                segment = chunk[i * chunk_len:(i + 1) * chunk_len]
-                val = np.mean(np.abs(segment)) / 32768
-                new_heights.append(val)
+            new_heights = chunk[:chunk_len * num_bars].reshape(num_bars, chunk_len).mean(axis=1) / 65536.0
 
-            bar_heights = np.maximum(new_heights, bar_heights * decay)
+            now = time.monotonic()
+            fall = decay ** ((now - last) / FRAME_TIME)
+            last = now
+            bar_heights = np.maximum(new_heights, bar_heights * fall)
 
-            clear_display()
-            for i, h in enumerate(bar_heights):
-                bar_h = int(h * HEIGHT * 1.5)
-                if bar_h > HEIGHT: bar_h = HEIGHT
-                x = i * (bar_width + 1)
-                draw.rectangle([x, HEIGHT - bar_h, x + bar_width - 1, HEIGHT], fill=255)
-                #draw.rectangle([x, 0, x + bar_width - 1, bar_h], fill=255)
-            buffer()
-            time.sleep(0.04)
+            with display_lock:
+                if gen != play_gen or not music_visualizer_active:
+                    break
+                draw.rectangle((0, 0, WIDTH, HEIGHT), outline=0, fill=0)
+                for i, h in enumerate(bar_heights):
+                    bar_h = int(h * HEIGHT * 1.5)
+                    if bar_h > HEIGHT: bar_h = HEIGHT
+                    x = i * (bar_width + 1)
+                    draw.rectangle([x, HEIGHT - bar_h, x + bar_width - 1, HEIGHT], fill=255)
+                    #draw.rectangle([x, 0, x + bar_width - 1, bar_h], fill=255)
+                buffer()
+
+            next_frame += FRAME_TIME
+            wait = next_frame - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            else:
+                next_frame = time.monotonic()
     except Exception as e:
         print("[Visualizer error:", e, "]")
 
@@ -455,14 +519,13 @@ def list_songs():
 def library_json():
     songs = []
     os.makedirs(COVERS_DIR, exist_ok=True)
-    os.makedirs(MUSIC_DIR, exist_ok=True)  # Ensure Music folder exists
+    os.makedirs(MUSIC_DIR, exist_ok=True)
 
     if not hasattr(app, "cover_cache"):
         app.cover_cache = set()
     if not hasattr(app, "cover_failed"):
         app.cover_failed = set()
 
-    # Get all valid audio files
     valid_files = [
         f for f in os.listdir(MUSIC_DIR)
         if f.lower().endswith(('.mp3', '.wav', '.flac', '.m4a'))
