@@ -206,21 +206,50 @@
   }
 
   function render() {
+    const src = status.source || "songs";
     const song = songFor(status.filename);
     const has = !!status.filename;
-    const title = song ? song.title : has ? stem(status.filename) : "Nothing playing";
-    const artist = song ? song.artist || "Unknown artist" : has ? "" : "Pick a song to start";
+    let title = song ? song.title : has ? stem(status.filename) : "Nothing playing";
+    let artist = song ? song.artist || "Unknown artist" : has ? "" : "Pick a song to start";
     const playing = status.state === "playing";
+
+    // what the player shows depends on where the sound comes from
+    document.body.dataset.source = src;
+    for (const b of document.querySelectorAll("#source button")) {
+      b.setAttribute("aria-pressed", String(b.dataset.source === src));
+    }
+    if (src === "input") {
+      title = "Listening";
+      artist = status.inputName || "Plug in a USB microphone, or a USB sound card with a cable";
+    } else if (src === "bluetooth") {
+      if (status.bt === "connected") {
+        title = status.btDevice || "Bluetooth device";
+        artist = "Connected over Bluetooth";
+      } else if (status.bt === "unavailable") {
+        title = "Bluetooth";
+        artist = "Not set up on this Pi yet";
+      } else {
+        title = "Waiting for a phone or TV";
+        artist = status.btAlias ? `Look for "${status.btAlias}"` : "Look for this Pi";
+      }
+    }
 
     $("now-title").textContent = title;
     $("now-artist").textContent = artist;
     $("mini-title").textContent = title;
     $("mini-artist").textContent = artist;
 
-    if (nowFilename !== status.filename) {
-      nowFilename = status.filename;
-      fillArt($("now-art"), song, has ? title : "");
-      fillArt($("mini-art"), song, has ? title : "");
+    const artKey = src === "songs" ? status.filename : "#" + src;
+    if (nowFilename !== artKey) {
+      nowFilename = artKey;
+      if (src === "songs") {
+        fillArt($("now-art"), song, has ? title : "");
+        fillArt($("mini-art"), song, has ? title : "");
+      } else {
+        const art = $("now-art");
+        art.style.background = "";
+        art.innerHTML = SOURCE_ICONS[src];
+      }
     }
 
     for (const id of ["play-btn", "mini-play"]) {
@@ -249,6 +278,39 @@
     syncLocal();
   }
 
+  // ---------- where the sound comes from ----------
+  const SOURCE_ICONS = {
+    input: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>',
+    bluetooth: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="1.6"/><path d="M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7M5.6 18.4a9 9 0 0 1 0-12.8M18.4 5.6a9 9 0 0 1 0 12.8"/></svg>',
+  };
+  let sourceBusy = false;
+
+  async function chooseSource(src) {
+    if (sourceBusy || (status.source || "songs") === src) return;
+    sourceBusy = true;
+    $("source").setAttribute("aria-busy", "true");
+    status = {
+      ...status, source: src,
+      state: src === "songs" ? status.state : "stopped",
+      listener: src === "songs" ? status.listener : null,
+      inputName: null, inputOk: false, inputError: null, bt: src === "bluetooth" ? "waiting" : "off",
+    };
+    render(); // switch the view straight away
+    try {
+      status = await (await api("/source?set=" + src)).json();
+      statusAt = performance.now();
+    } catch {
+      cantReach();
+    }
+    sourceBusy = false;
+    $("source").removeAttribute("aria-busy");
+    render();
+    setTimeout(poll, 1500); // device names arrive a moment later
+  }
+  for (const b of document.querySelectorAll("#source button")) {
+    b.addEventListener("click", () => chooseSource(b.dataset.source));
+  }
+
   // ---------- where the sound plays ----------
   const SPEAKER_NAMES = { usb: "USB speaker", jack: "Headphone jack" };
   let speakerBusy = false;
@@ -266,7 +328,31 @@
 
     let text = "";
     let warn = false;
-    if (me && localBlocked) {
+    const src = status.source || "songs";
+    if (src === "input") {
+      if (status.inputName && !status.inputOk && status.inputError) {
+        warn = true;
+        text = status.inputError === "busy"
+          ? `Another program on the Pi is using "${status.inputName}". Restart the Pi, then choose Mic or cable again.`
+          : `Can't record from "${status.inputName}". Unplug it and plug it back in.`;
+      } else if (status.inputOk) {
+        text = "The bars follow whatever it hears and adjust to how loud it is.";
+      }
+    } else if (src === "bluetooth") {
+      if (status.bt === "unavailable") {
+        warn = true;
+        text = 'Bluetooth sound isn\'t set up on this Pi. On the Pi, run "sudo bash setup.sh" again, then restart the app.';
+      } else if (status.btSpeakerOk === false) {
+        warn = true;
+        text = status.speaker === "usb"
+          ? "The Pi doesn't see a USB speaker, so you won't hear it from the Pi. The bars still follow the sound."
+          : "Can't use the headphone jack, so you won't hear it from the Pi. The bars still follow the sound.";
+      } else if (status.bt === "connected") {
+        text = "Play something on your device. Its volume and the slider above both work.";
+      } else {
+        text = `On your phone or TV, open the Bluetooth settings and pick ${status.btAlias ? `"${status.btAlias}"` : "this Pi"}. The Pi stays visible while Bluetooth is chosen here.`;
+      }
+    } else if (me && localBlocked) {
       text = `Tap play to hear it on ${HERE}.`;
     } else if (status.listener && !me) {
       text = `Sound is playing on another phone or computer. Tap ${HERE_LABEL} to hear it here instead.`;
@@ -445,7 +531,7 @@
 
   // ---------- actions ----------
   async function playSong(filename) {
-    status = { ...status, state: "playing", filename, position: 0, length: 0 };
+    status = { ...status, source: "songs", state: "playing", filename, position: 0, length: 0 };
     statusAt = performance.now();
     render();
     try {
@@ -618,6 +704,8 @@
   let ytTimer = null;
   let ytEdited = { song: false, artist: false };
   let ytMissing = [];
+  let ytBackground = false; // "Save when ready" was tapped: the download carries on while you use the page
+  const ytWaiting = (j) => !!j && !!j.waiting && YT_RUNNING.includes(j.state);
 
   async function ytPost(path, body) {
     const res = await fetch(path, {
@@ -641,7 +729,7 @@
     yt.link.hidden = active;
     yt.job.hidden = !active;
     yt.save.hidden = !active;
-    yt.cancel.textContent = active ? "Cancel" : "Close";
+    yt.cancel.textContent = !active ? "Close" : ytWaiting(j) ? "Cancel download" : "Cancel";
     yt.get.disabled = ytMissing.length > 0;
     const err = message || (j && j.error) || "";
     yt.error.hidden = !err;
@@ -664,8 +752,9 @@
 
     const name = ytFileName();
     yt.file.textContent = name || "…";
-    yt.save.textContent = j.state === "ready" ? "Save song" : "Save when ready";
-    yt.save.disabled = !name || !!j.waiting;
+    // once it's set to save, "OK" hides this box again (and keeps any name change)
+    yt.save.textContent = j.state === "ready" ? "Save song" : ytWaiting(j) ? "OK" : "Save when ready";
+    yt.save.disabled = !name;
   }
 
   // returns true when this download is over (saved, failed or stopped)
@@ -674,6 +763,8 @@
     if (!j) return true;
     if (j.state === "saved") {
       ytJob = null;
+      ytBackground = false;
+      renderYtButton();
       try { sessionStorage.removeItem("rpi-music-yt"); } catch {}
       yt.dialog.close();
       toast(`Added "${(j.filename || "").replace(/\.mp3$/i, "")}".`, 5000);
@@ -684,6 +775,12 @@
     if (j.state === "failed" || j.state === "cancelled" || j.state === "none") {
       const msg = j.state === "failed" ? j.error : "The download was stopped.";
       ytJob = null;
+      if (ytBackground) {
+        ytBackground = false;
+        try { sessionStorage.removeItem("rpi-music-yt"); } catch {}
+        toast(j.state === "failed" ? `YouTube download failed. ${msg}` : msg, 7000);
+      }
+      renderYtButton();
       renderYt(msg);
       return true;
     }
@@ -701,9 +798,15 @@
         return ytPoll(); // the Pi is busy or briefly unreachable: keep trying
       }
       if (ytSettle()) return;
+      if (ytBackground && ytJob.state === "ready") {
+        // finished, but a song with that name turned up meanwhile: ask for another name
+        ytBackground = false;
+        if (!yt.dialog.open) yt.dialog.showModal();
+      }
       renderYt();
+      renderYtButton();
       if (YT_RUNNING.includes(ytJob.state)) ytPoll();
-    }, 800);
+    }, ytBackground ? 1500 : 800);
   }
 
   async function ytStart() {
@@ -753,6 +856,15 @@
       }
       ytJob = data;
       if (ytSettle()) return;
+      if (ytWaiting(ytJob)) {
+        // let you carry on using the page; the YouTube button shows how it's going
+        if (!ytBackground) toast("Still downloading. The song will appear in your library when it's ready.", 5000);
+        ytBackground = true;
+        yt.dialog.close();
+        renderYtButton();
+        ytPoll();
+        return;
+      }
       renderYt();
       if (YT_RUNNING.includes(ytJob.state)) ytPoll();
     } catch {
@@ -760,13 +872,32 @@
     }
   }
 
+  // the YouTube button at the top doubles as a progress bar while a song downloads in the background
+  function renderYtButton() {
+    const b = $("yt-btn");
+    const j = ytJob;
+    const busy = ytBackground && !!j && YT_RUNNING.includes(j.state);
+    b.classList.toggle("is-busy", busy);
+    if (!busy) {
+      $("yt-btn-text").textContent = "YouTube";
+      b.title = "Download a song from YouTube";
+      return;
+    }
+    const pct = j.state === "downloading" ? Math.round(j.percent || 0) : j.state === "converting" ? 100 : 0;
+    b.style.setProperty("--p", pct + "%");
+    $("yt-btn-text").textContent = j.state === "converting" ? "Converting…" : `YouTube ${pct}%`;
+    b.title = j.state === "converting" ? "Converting to MP3. Tap to see it." : `Downloading from YouTube, ${pct}%. Tap to see it.`;
+  }
+
   function ytClose() {
     const j = ytJob;
+    ytBackground = false;
     if (ytActive(j)) ytPost("/youtube/cancel", { id: j.id }).catch(() => {}); // deletes what was downloaded
     ytJob = null;
     clearTimeout(ytTimer);
     try { sessionStorage.removeItem("rpi-music-yt"); } catch {}
     yt.dialog.close();
+    renderYtButton();
   }
 
   async function ytOpen() {
@@ -802,7 +933,11 @@
   });
   yt.save.addEventListener("click", ytSave);
   yt.cancel.addEventListener("click", ytClose);
-  yt.dialog.addEventListener("cancel", (e) => { e.preventDefault(); ytClose(); }); // Esc key
+  yt.dialog.addEventListener("cancel", (e) => { // Esc key
+    e.preventDefault();
+    if (ytWaiting(ytJob)) { ytBackground = true; yt.dialog.close(); renderYtButton(); }
+    else ytClose();
+  });
   for (const key of ["song", "artist"]) {
     yt[key].addEventListener("input", () => { ytEdited[key] = true; renderYt(); });
   }
@@ -841,6 +976,7 @@
     const tag = (e.target.tagName || "").toLowerCase();
     if (e.metaKey || e.ctrlKey || e.altKey || tag === "input" || tag === "textarea") return;
     if (document.querySelector("dialog[open]")) return;
+    if ((status.source || "songs") !== "songs" && e.key !== "/") return;
     if (e.key === " " && tag !== "button") { e.preventDefault(); togglePlay(); }
     else if (e.key === "ArrowRight") { e.preventDefault(); step(1); }
     else if (e.key === "ArrowLeft") { e.preventDefault(); step(-1); }
@@ -849,7 +985,7 @@
 
   // ---------- mini player on phones ----------
   function updateMini() {
-    const show = narrow.matches && !playerVisible && !!status.filename;
+    const show = narrow.matches && !playerVisible && !!status.filename && (status.source || "songs") === "songs";
     $("mini").hidden = !show;
     document.body.classList.toggle("has-mini", show);
   }
@@ -956,8 +1092,16 @@
     const mine = sessionStorage.getItem("rpi-music-yt");
     if (mine) {
       api("/youtube").then((r) => r.json()).then((d) => {
-        if (d.id === mine && ytActive(d)) ytOpen();
-        else sessionStorage.removeItem("rpi-music-yt");
+        if (d.id === mine && ytWaiting(d)) {
+          ytJob = d; // set to save: keep following it in the background
+          ytBackground = true;
+          renderYtButton();
+          ytPoll();
+        } else if (d.id === mine && ytActive(d)) {
+          ytOpen();
+        } else {
+          sessionStorage.removeItem("rpi-music-yt");
+        }
       }).catch(() => {});
     }
   } catch {}
