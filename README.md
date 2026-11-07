@@ -11,14 +11,14 @@ A small music player for the Raspberry Pi with a 2.23" OLED HAT. Bars on the scr
 - **OLED visualizer:** bars that follow the music, at a steady 25 fps.
 - **Web page:** play, pause, skip, random song, volume, and search your library.
 - **Live screen view:** the web page shows exactly what's on the OLED.
-- **Add songs from the page:** drag and drop files, or use Add songs.
+- **Add songs from the page:** drag and drop files, use Add songs, or get a song from YouTube as an MP3.
 - **Cover art:** fetched and saved automatically.
 
 ## What you need
 * [Raspberry Pi Zero 2 W](https://amzn.to/4qtC0pm)
 * [Micro SD card](https://amzn.to/4erXgWD)
 * [2.23" OLED HAT](https://amzn.to/3V2gCKb)
-* [UPS HAT (C)](https://amzn.to/4oGmKnB)
+* [UPS HAT (C)](https://amzn.to/4oGmKnB) (optional, for battery power)
 * [Mini speaker](https://amzn.to/43DTbL4)
 
 (Amazon affiliate links)
@@ -39,26 +39,25 @@ A small music player for the Raspberry Pi with a 2.23" OLED HAT. Bars on the scr
    ```
    `setup.sh` creates a Python environment (`Music_env`) and installs everything into it.
 
-5. **Pick your speaker** in `config.yaml`:
-   ```yaml
-   audio:
-     jackInput: false  # false = USB speaker, true = headphone jack (on Pis that have one)
-   ```
-
 ## Usage
 ```bash
 python3 start.py
 ```
 Then open `http://<your-pi-ip>:5000` on a phone or computer on the same Wi-Fi. If you don't know the Pi's IP, run `hostname -I`.
 
+**Choosing where the sound plays:** tap **USB speaker**, **Headphone jack** (on Pis that have one), or **This computer** / **This phone** to hear it on the device you're using. The screen on the Pi keeps moving either way.
+
 **Adding songs:** drop MP3, WAV, FLAC or M4A files onto the page, or copy them into the `Music/` folder. For cover art to be found, name files like `Song Name - Artist.mp3`, for example `Blinding Lights - The Weeknd.mp3`.
+
+**From YouTube:** tap **YouTube**, paste a link to the video, and check the song name and artist. Only the MP3 is kept, saved as `Song Name - Artist.mp3`.
 
 **Keyboard shortcuts** (on a computer): Space to play or pause, ← and → for previous and next, / to search.
 
 ## Troubleshooting
 - **Screen stays blank:** check that SPI and I2C are on and the HAT is pressed all the way down.
-- **No sound:** check `jackInput` in `config.yaml` matches your speaker, and plug in a USB speaker before starting. If the terminal says it's using silent mode, the Pi couldn't open the speaker.
+- **No sound:** check the speaker choice on the web page. If it says it can't find the speaker, plug it in and tap it again, or tap **This computer** to listen on your device.
 - **Page won't load:** make sure your device is on the same network as the Pi and the address ends in `:5000`.
+- **YouTube downloads stop working:** YouTube changes often. Run `sudo bash setup.sh` again to update the downloader.
 - More about the screen: [Waveshare 2.23" OLED HAT wiki](https://www.waveshare.com/wiki/2.23inch_OLED_HAT)
 
 ---
