@@ -10,6 +10,7 @@
   --pad:      #D7B75A;
   --pad-hi:   #E5C872;
   --glass:    #000000;
+  --warn:     #E98A7E;
 
   --display: "Chakra Petch", "Segoe UI", system-ui, sans-serif;
   --text: "Atkinson Hyperlegible", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -64,6 +65,17 @@ svg { display: block; }
 }
 .pill svg { width: 18px; height: 18px; flex: none; }
 .pill:hover { background: var(--board-3); }
+.pill.primary { padding: 0 18px; background: var(--pad); border-color: var(--pad); color: var(--board); }
+.pill.primary:hover { background: var(--pad-hi); }
+.pill:disabled { opacity: .5; cursor: default; }
+.top-actions { display: flex; gap: 8px; }
+.empty-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* small phones: drop the button icons so both header buttons fit */
+@media (max-width: 400px) {
+  .top .pill { padding: 0 12px; }
+  .top .pill svg { display: none; }
+}
 
 /* ---------- layout ---------- */
 .layout {
@@ -190,6 +202,40 @@ svg { display: block; }
 .volume input::-moz-range-track { height: 4px; border-radius: 2px; background: var(--line); }
 .volume input::-moz-range-progress { height: 4px; border-radius: 2px; background: var(--pad); }
 .volume input::-moz-range-thumb { width: 16px; height: 16px; border: 0; border-radius: 50%; background: var(--silk); }
+
+/* speaker choice: two buttons in one track */
+.speaker {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;   /* 2 or 3 equal choices, depending on the Pi */
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.speaker button {
+  min-height: 34px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--silk-dim);
+  font-size: .875rem;
+  font-weight: 700;
+  line-height: 1.2;
+  cursor: pointer;
+}
+.speaker button:hover { color: var(--silk); }
+.speaker button[aria-pressed="true"] { background: var(--board-3); color: var(--silk); }
+.speaker[aria-busy="true"] { opacity: .6; pointer-events: none; }
+.speaker-note {
+  margin-top: -8px;
+  padding-left: 12px;
+  border-left: 2px solid var(--line);
+  color: var(--silk-dim);
+  font-size: .875rem;
+}
+.speaker-note.is-warning { border-left-color: var(--warn); color: var(--silk); }
 
 /* ---------- library ---------- */
 .library { min-width: 0; }
@@ -333,6 +379,43 @@ svg { display: block; }
   pointer-events: none;
 }
 .drop-title { font: 600 1.5rem/1.3 var(--display); color: var(--silk); }
+
+/* ---------- YouTube dialog ---------- */
+.sheet {
+  width: min(100% - 32px, 480px);
+  max-height: calc(100% - 32px);
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-l);
+  background: var(--board-2);
+  color: var(--silk);
+}
+.sheet::backdrop { background: rgba(15, 31, 26, .8); }
+.sheet-body { display: flex; flex-direction: column; gap: 16px; padding: 20px; }
+.sheet h2 { font: 600 1.25rem/1.3 var(--display); }
+.sheet-hint { margin-top: -10px; color: var(--silk-dim); font-size: .9375rem; }
+.sheet input {
+  width: 100%;
+  min-width: 0;
+  height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  background: var(--board);
+  color: var(--silk);
+  font: inherit;
+}
+.sheet input::placeholder { color: var(--silk-dim); opacity: 1; }
+.sheet input:focus { border-color: var(--pad); outline: none; }
+.yt-link { display: flex; gap: 8px; }
+.yt-link .pill { height: 44px; flex: none; }
+.yt-job { display: flex; flex-direction: column; gap: 12px; }
+.yt-status { font-weight: 700; }
+.field { display: flex; flex-direction: column; gap: 6px; font-size: .875rem; color: var(--silk-dim); }
+.yt-file { color: var(--silk-dim); font-size: .8125rem; overflow-wrap: anywhere; }
+.yt-file span { color: var(--silk); }
+.yt-error { padding-left: 12px; border-left: 2px solid var(--warn); font-size: .9375rem; }
+.sheet-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 /* ---------- toast ---------- */
 .toast {
