@@ -18,7 +18,7 @@
   <div class="top-actions">
     <button class="pill" id="yt-btn" type="button" title="Download a song from YouTube">
       <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19h14"/></svg>
-      YouTube
+      <span id="yt-btn-text">YouTube</span>
     </button>
     <button class="pill" id="add-btn" type="button">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
@@ -31,6 +31,12 @@
 <div class="layout">
 
   <section class="player" id="player" aria-label="Now playing">
+    <div class="source" id="source" role="group" aria-label="Play from">
+      <button type="button" data-source="songs" aria-pressed="true">Songs</button>
+      <button type="button" data-source="input" aria-pressed="false">Mic or cable</button>
+      <button type="button" data-source="bluetooth" aria-pressed="false">Bluetooth</button>
+    </div>
+
     <div class="screen">
       <canvas id="screen" width="512" height="128" role="img" aria-label="Live view of the Pi's screen"></canvas>
     </div>
