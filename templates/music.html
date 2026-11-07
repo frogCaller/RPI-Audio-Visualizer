@@ -15,10 +15,16 @@
 
 <header class="top">
   <h1>RPi Music</h1>
-  <button class="pill" id="add-btn" type="button">
-    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-    Add songs
-  </button>
+  <div class="top-actions">
+    <button class="pill" id="yt-btn" type="button" title="Download a song from YouTube">
+      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19h14"/></svg>
+      YouTube
+    </button>
+    <button class="pill" id="add-btn" type="button">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      Add songs
+    </button>
+  </div>
   <input type="file" id="file-input" accept=".mp3,.wav,.flac,.m4a" multiple hidden>
 </header>
 
@@ -66,6 +72,13 @@
         <input type="range" id="volume" min="0" max="100" value="100" aria-label="Volume">
       </label>
     </div>
+
+    <div class="speaker" id="speaker" role="group" aria-label="Where the sound plays">
+      <button type="button" data-mode="usb" aria-pressed="false">USB speaker</button>
+      <button type="button" data-mode="jack" id="jack-btn" aria-pressed="false">Headphone jack</button>
+      <button type="button" data-mode="browser" id="here-btn" aria-pressed="false">This computer</button>
+    </div>
+    <p class="speaker-note" id="speaker-note" role="status" hidden></p>
   </section>
 
   <section class="library" aria-label="Library">
@@ -81,11 +94,17 @@
 
     <div class="empty" id="empty-library" hidden>
       <h2>No songs yet</h2>
-      <p>Add MP3, WAV, FLAC or M4A files, or drop them anywhere on this page. Name them like "Song - Artist.mp3" so cover art can be found.</p>
-      <button class="pill" id="empty-add-btn" type="button">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-        Add songs
-      </button>
+      <p>Add MP3, WAV, FLAC or M4A files, or drop them anywhere on this page. Name them like "Song - Artist.mp3" so cover art can be found. You can also get a song from YouTube.</p>
+      <div class="empty-actions">
+        <button class="pill" id="empty-add-btn" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          Add songs
+        </button>
+        <button class="pill" id="empty-yt-btn" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19h14"/></svg>
+          YouTube
+        </button>
+      </div>
     </div>
 
     <div class="empty" id="empty-search" hidden>
@@ -118,6 +137,39 @@
     <p>MP3, WAV, FLAC or M4A</p>
   </div>
 </div>
+
+<dialog class="sheet" id="yt-dialog" aria-labelledby="yt-heading">
+  <form class="sheet-body" id="yt-form" novalidate>
+    <h2 id="yt-heading">Get a song from YouTube</h2>
+    <p class="sheet-hint" id="yt-hint">Paste a link to the video. Only the MP3 is kept.</p>
+
+    <div class="yt-link" id="yt-link-row">
+      <input type="url" id="yt-url" placeholder="Paste a YouTube link" autocomplete="off" inputmode="url" aria-label="YouTube link">
+      <button class="pill primary" id="yt-get" type="submit">Get song</button>
+    </div>
+
+    <div class="yt-job" id="yt-job" hidden>
+      <p class="yt-status" id="yt-status" role="status" aria-live="polite">Looking up the song…</p>
+      <span class="bar"><span class="bar-fill" id="yt-bar"></span></span>
+      <label class="field">
+        <span>Song name</span>
+        <input id="yt-song" maxlength="80" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="field">
+        <span>Artist</span>
+        <input id="yt-artist" maxlength="60" autocomplete="off" spellcheck="false">
+      </label>
+      <p class="yt-file">Saved as <span id="yt-filename"></span></p>
+    </div>
+
+    <p class="yt-error" id="yt-error" role="alert" hidden></p>
+
+    <div class="sheet-actions">
+      <button class="pill" id="yt-cancel" type="button">Cancel</button>
+      <button class="pill primary" id="yt-save" type="button" hidden>Save song</button>
+    </div>
+  </form>
+</dialog>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
