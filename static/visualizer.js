@@ -16,6 +16,21 @@
   let volumeTouchedAt = 0;
   let playerVisible = true;
 
+  // this tab's id, so the Pi knows which device plays the sound (kept when the tab reloads)
+  const CLIENT_ID = (() => {
+    const make = () => Math.random().toString(36).slice(2, 12);
+    try {
+      let id = sessionStorage.getItem("rpi-music-tab");
+      if (!id) { id = make(); sessionStorage.setItem("rpi-music-tab", id); }
+      return id;
+    } catch {
+      return make();
+    }
+  })();
+  const HERE = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ? "this phone" : "this computer";
+  const HERE_LABEL = HERE.charAt(0).toUpperCase() + HERE.slice(1);
+  const listening = () => !!status.listener && status.listener === CLIENT_ID;
+
   // ---------- helpers ----------
   const fmt = (s) => {
     s = Math.max(0, Math.floor(s || 0));
@@ -158,11 +173,20 @@
     render();
   }
 
+  // every 2 s, or every 1 s while this device plays the sound
+  let pollGen = 0;
   function startPolling() {
-    if (!pollTimer) pollTimer = setInterval(poll, 2000);
+    if (pollTimer !== null) return;
+    const gen = ++pollGen;
+    const loop = async () => {
+      await poll();
+      if (gen === pollGen) pollTimer = setTimeout(loop, listening() ? 1000 : 2000);
+    };
+    pollTimer = setTimeout(loop, 2000);
   }
   function stopPolling() {
-    clearInterval(pollTimer);
+    pollGen++;
+    clearTimeout(pollTimer);
     pollTimer = null;
   }
   // playback starts in the background on the Pi, so check back shortly after a tap
@@ -204,11 +228,194 @@
       activeTile = tile;
     }
 
-    if (Date.now() - volumeTouchedAt > 3000) setVolumeSlider(Math.round((status.volume ?? 1) * 100));
+    if (Date.now() - volumeTouchedAt > 3000) {
+      setVolumeSlider(listening() ? localVolume : Math.round((status.volume ?? 1) * 100));
+    }
 
     document.title = playing ? `${title} - RPi Music` : "RPi Music";
     updateProgress();
     updateMini();
+    if (!speakerBusy) renderSpeaker();
+    syncLocal();
+  }
+
+  // ---------- where the sound plays ----------
+  const SPEAKER_NAMES = { usb: "USB speaker", jack: "Headphone jack" };
+  let speakerBusy = false;
+  $("here-btn").textContent = HERE_LABEL;
+
+  function renderSpeaker() {
+    if (!status.speaker) return; // older server without speaker info
+    const me = listening();
+    for (const b of document.querySelectorAll("#speaker button")) {
+      const on = b.dataset.mode === "browser" ? me : !status.listener && b.dataset.mode === status.speaker;
+      b.setAttribute("aria-pressed", String(on));
+    }
+    // most Pis used for this (like the Zero 2 W) have no headphone jack
+    $("jack-btn").hidden = status.hasJack === false && status.speaker !== "jack";
+
+    let text = "";
+    let warn = false;
+    if (me && localBlocked) {
+      text = `Tap play to hear it on ${HERE}.`;
+    } else if (status.listener && !me) {
+      text = `Sound is playing on another phone or computer. Tap ${HERE_LABEL} to hear it here instead.`;
+    } else if (!status.listener && status.speakerOk === false) {
+      warn = true;
+      const name = SPEAKER_NAMES[status.speaker];
+      if (status.speakerError === "busy") {
+        text = `Another program on the Pi is using the ${name.toLowerCase()}. Restart the Pi, then tap ${name}.`;
+      } else if (status.speaker === "usb") {
+        text = `Can't find the USB speaker. Plug it in and tap USB speaker, or tap ${HERE_LABEL} to hear it here.`;
+      } else {
+        text = "Can't use the headphone jack. Tap Headphone jack to try again, or pick another option.";
+      }
+    }
+    const note = $("speaker-note");
+    note.hidden = !text;
+    note.textContent = text;
+    note.classList.toggle("is-warning", warn);
+  }
+
+  function applySpeakerInfo(data) {
+    status = {
+      ...status,
+      speaker: data.mode, speakerOk: data.ok, speakerError: data.error,
+      hasJack: data.hasJack, listener: data.listener,
+    };
+  }
+
+  async function chooseSpeaker(mode) {
+    if (speakerBusy) return;
+
+    if (mode === "browser") {
+      if (listening()) return;
+      localBlocked = false;
+      unlockLocal();                                 // has to happen inside the tap
+      status = { ...status, listener: CLIENT_ID };
+      render();                                      // starts the sound here right away
+      try {
+        applySpeakerInfo(await (await api("/audio_mode?set=browser&client=" + CLIENT_ID)).json());
+        toast(`Sound plays on ${HERE} now.`);
+      } catch {
+        cantReach();
+      }
+      render();
+      return;
+    }
+
+    const name = SPEAKER_NAMES[mode];
+    const wasPlaying = status.state === "playing";
+    status = { ...status, listener: null, speaker: mode, speakerOk: true };
+    render();                                        // stops the sound here right away
+    speakerBusy = true;
+    $("speaker").setAttribute("aria-busy", "true");
+    toast(`Switching to ${name}…`, 0);
+    try {
+      const data = await (await api("/audio_mode?set=" + mode)).json();
+      applySpeakerInfo(data);
+      if (!data.ok) {
+        toast(mode === "usb" ? "Couldn't find the USB speaker." : "Couldn't use the headphone jack.", 5000);
+      } else if (data.saved === false) {
+        toast(`Switched to ${name}, but the Pi couldn't save it for next time.`, 6000);
+      } else {
+        toast(`Switched to ${name}.` + (data.restarted && wasPlaying ? " Press play to continue." : ""), 5000);
+      }
+    } catch {
+      cantReach();
+    }
+    speakerBusy = false;
+    $("speaker").removeAttribute("aria-busy");
+    render();
+    poll();
+  }
+
+  // ---------- playing the sound on this device ----------
+  // The Pi keeps time (so its screen matches); this device plays the same song in step with it.
+  const local = new Audio();
+  local.preload = "auto";
+  let localFile = null;      // song loaded here
+  let localBlocked = false;  // the browser wants a tap before it plays sound
+  let lastSeek = 0;
+  let unlocked = false;
+  let localVolume = 100;
+  try {
+    const v = parseInt(localStorage.getItem("rpi-music-volume-here"), 10);
+    if (v >= 0 && v <= 100) localVolume = v;
+  } catch {}
+  local.volume = localVolume / 100;
+
+  // a moment of silence played inside a tap, so phones allow sound later without another tap
+  function unlockLocal() {
+    if (unlocked || localFile) return;
+    unlocked = true;
+    const n = 800, buf = new Uint8Array(44 + n), v = new DataView(buf.buffer);
+    const put = (o, s) => { for (let i = 0; i < s.length; i++) buf[o + i] = s.charCodeAt(i); };
+    put(0, "RIFF"); v.setUint32(4, 36 + n, true); put(8, "WAVEfmt "); v.setUint32(16, 16, true);
+    v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, 8000, true);
+    v.setUint32(28, 8000, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true);
+    put(36, "data"); v.setUint32(40, n, true); buf.fill(128, 44);
+    local.src = URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+    local.play().catch(() => {});
+  }
+
+  function playLocal() {
+    const p = local.play();
+    if (!p || !p.then) return;
+    p.then(() => {
+      if (localBlocked) { localBlocked = false; renderSpeaker(); }
+    }).catch((err) => {
+      if (err && err.name === "NotAllowedError" && listening()) { localBlocked = true; renderSpeaker(); }
+    });
+  }
+
+  function syncLocal() {
+    if (!listening() || !status.filename || status.state === "stopped") {
+      if (!local.paused) local.pause();
+      if (!listening() && localFile) {
+        localFile = null;
+        local.removeAttribute("src");
+        local.load();
+      }
+      return;
+    }
+    if (localFile !== status.filename) {
+      localFile = status.filename;
+      local.src = "/audio/" + encodeURIComponent(localFile);
+      local.playbackRate = 1;
+    }
+    if (local.readyState >= 1) {
+      const target = position();
+      const diff = local.currentTime - target;
+      const now = performance.now();
+      if (Math.abs(diff) > 0.35 && (status.state !== "playing" || now - lastSeek > 2500)) {
+        local.currentTime = target;
+        lastSeek = now;
+        local.playbackRate = 1;
+      } else if (status.state === "playing") {
+        // small drift: run a touch faster or slower instead of jumping
+        local.playbackRate = Math.abs(diff) < 0.04 ? 1 : diff > 0 ? 0.98 : 1.02;
+      }
+    }
+    if (status.state === "paused") {
+      if (!local.paused) local.pause();
+    } else if (local.paused && !localBlocked) {
+      playLocal();
+    }
+  }
+
+  local.addEventListener("loadedmetadata", () => {
+    if (!listening() || !localFile || local.src.startsWith("blob:")) return;
+    local.currentTime = position();
+    lastSeek = performance.now();
+  });
+  local.addEventListener("error", () => {
+    if (listening() && localFile) toast(`This song can't play on ${HERE}.`, 5000);
+  });
+  setInterval(() => { if (listening()) syncLocal(); }, 500);
+
+  for (const b of document.querySelectorAll("#speaker button")) {
+    b.addEventListener("click", () => chooseSpeaker(b.dataset.mode));
   }
 
   function updateProgress() {
@@ -236,21 +443,29 @@
   }
 
   async function togglePlay() {
+    // the Pi is playing, but this device was waiting for a tap before making sound
+    if (listening() && status.state === "playing" && local.paused) {
+      localBlocked = false;
+      playLocal();
+      renderSpeaker();
+      return;
+    }
+    let path;
+    if (status.state === "playing") {
+      status = { ...status, state: "paused", position: position() };
+      path = "/pause";
+    } else if (status.state === "paused") {
+      status = { ...status, state: "playing", position: position() };
+      path = "/resume";
+    } else if (status.filename) {
+      return playSong(status.filename); // song finished: play it again
+    } else {
+      return shuffle();
+    }
+    statusAt = performance.now();
+    render(); // pauses or resumes the sound here straight away
     try {
-      if (status.state === "playing") {
-        const p = position();
-        await api("/pause");
-        status = { ...status, state: "paused", position: p };
-      } else if (status.state === "paused") {
-        await api("/resume");
-        status = { ...status, state: "playing" };
-      } else if (status.filename) {
-        return playSong(status.filename); // song finished: play it again
-      } else {
-        return shuffle();
-      }
-      statusAt = performance.now();
-      render();
+      await api(path);
     } catch {
       cantReach();
     }
@@ -259,6 +474,7 @@
 
   async function step(direction) {
     if (!library.length) return toast("Add some songs first.");
+    if (listening()) unlockLocal();
     try {
       const data = await (await api(direction > 0 ? "/next" : "/prev")).json();
       if (data.success) {
@@ -276,6 +492,7 @@
 
   async function shuffle() {
     if (!library.length) return toast("Add some songs first.");
+    if (listening()) unlockLocal();
     try {
       await api("/play");
     } catch {
@@ -294,6 +511,13 @@
   volume.addEventListener("input", () => {
     volumeTouchedAt = Date.now();
     setVolumeSlider(volume.value);
+    if (listening()) {
+      // this device's own volume; the Pi's volume stays as it was
+      localVolume = Number(volume.value);
+      local.volume = localVolume / 100;
+      try { localStorage.setItem("rpi-music-volume-here", String(localVolume)); } catch {}
+      return;
+    }
     clearTimeout(volumeTimer);
     volumeTimer = setTimeout(() => {
       api("/volume?level=" + (volume.value / 100).toFixed(2)).catch(cantReach);
@@ -367,6 +591,210 @@
     addFiles(e.dataTransfer.files);
   });
 
+  // ---------- getting a song from YouTube ----------
+  const yt = {
+    dialog: $("yt-dialog"), form: $("yt-form"), url: $("yt-url"), get: $("yt-get"),
+    link: $("yt-link-row"), job: $("yt-job"), status: $("yt-status"), bar: $("yt-bar"),
+    song: $("yt-song"), artist: $("yt-artist"), file: $("yt-filename"),
+    error: $("yt-error"), save: $("yt-save"), cancel: $("yt-cancel"),
+  };
+  const YT_RUNNING = ["starting", "downloading", "converting"];
+  const ytActive = (j) => !!j && (YT_RUNNING.includes(j.state) || j.state === "ready");
+  let ytJob = null;     // latest state of this page's download, from the Pi
+  let ytTimer = null;
+  let ytEdited = { song: false, artist: false };
+  let ytMissing = [];
+
+  async function ytPost(path, body) {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return { ok: res.ok, data: await res.json().catch(() => ({})) };
+  }
+
+  // same clean-up the Pi does, so the preview matches the saved file
+  const ytClean = (s) => s.replace(/[\\/:*?"<>|]/g, "").replace(/ - /g, " – ").replace(/\s+/g, " ").trim();
+  function ytFileName() {
+    const song = ytClean(yt.song.value), artist = ytClean(yt.artist.value);
+    return song ? (artist ? `${song} - ${artist}.mp3` : `${song}.mp3`) : "";
+  }
+
+  function renderYt(message) {
+    const j = ytJob;
+    const active = ytActive(j);
+    yt.link.hidden = active;
+    yt.job.hidden = !active;
+    yt.save.hidden = !active;
+    yt.cancel.textContent = active ? "Cancel" : "Close";
+    yt.get.disabled = ytMissing.length > 0;
+    const err = message || (j && j.error) || "";
+    yt.error.hidden = !err;
+    yt.error.textContent = err;
+    if (!active) return;
+
+    // fill in the names YouTube gives, unless you've already typed your own
+    if (!ytEdited.song && j.song) yt.song.value = j.song;
+    if (!ytEdited.artist && j.artist) yt.artist.value = j.artist;
+
+    const pct = Math.round(j.percent || 0);
+    let text;
+    if (j.state === "starting") text = "Looking up the song…";
+    else if (j.state === "downloading") text = `Downloading… ${pct}%`;
+    else if (j.state === "converting") text = "Converting to MP3…";
+    else text = "Ready. Check the name, then save it.";
+    if (j.waiting && j.state !== "ready") text += " It will be saved when it's done.";
+    yt.status.textContent = text;
+    yt.bar.style.width = (j.state === "starting" ? 0 : j.state === "downloading" ? pct : 100) + "%";
+
+    const name = ytFileName();
+    yt.file.textContent = name || "…";
+    yt.save.textContent = j.state === "ready" ? "Save song" : "Save when ready";
+    yt.save.disabled = !name || !!j.waiting;
+  }
+
+  // returns true when this download is over (saved, failed or stopped)
+  function ytSettle() {
+    const j = ytJob;
+    if (!j) return true;
+    if (j.state === "saved") {
+      ytJob = null;
+      try { sessionStorage.removeItem("rpi-music-yt"); } catch {}
+      yt.dialog.close();
+      toast(`Added "${(j.filename || "").replace(/\.mp3$/i, "")}".`, 5000);
+      loadLibrary();
+      setTimeout(loadLibrary, 6000); // pick up cover art fetched in the background
+      return true;
+    }
+    if (j.state === "failed" || j.state === "cancelled" || j.state === "none") {
+      const msg = j.state === "failed" ? j.error : "The download was stopped.";
+      ytJob = null;
+      renderYt(msg);
+      return true;
+    }
+    return false;
+  }
+
+  function ytPoll() {
+    clearTimeout(ytTimer);
+    ytTimer = setTimeout(async () => {
+      if (!ytJob) return;
+      try {
+        const data = await (await api("/youtube")).json();
+        ytJob = data.id === ytJob.id ? data : { state: "none" };
+      } catch {
+        return ytPoll(); // the Pi is busy or briefly unreachable: keep trying
+      }
+      if (ytSettle()) return;
+      renderYt();
+      if (YT_RUNNING.includes(ytJob.state)) ytPoll();
+    }, 800);
+  }
+
+  async function ytStart() {
+    const url = yt.url.value.trim();
+    if (!url) {
+      renderYt("Paste a link to a YouTube video first.");
+      yt.url.focus();
+      return;
+    }
+    yt.get.disabled = true;
+    ytEdited = { song: false, artist: false };
+    yt.song.value = "";
+    yt.artist.value = "";
+    try {
+      const { ok, data } = await ytPost("/youtube/start", { url });
+      if (!ok) {
+        renderYt(data.error || "Couldn't start the download.");
+        return;
+      }
+      ytJob = data;
+      try { sessionStorage.setItem("rpi-music-yt", data.id); } catch {}
+      renderYt();
+      yt.song.focus();
+      ytPoll();
+    } catch {
+      renderYt("Can't reach the Pi. Check that it's on and connected to Wi-Fi.");
+    } finally {
+      yt.get.disabled = ytMissing.length > 0;
+    }
+  }
+
+  async function ytSave() {
+    if (!ytJob) return;
+    if (!ytFileName()) {
+      renderYt("Give the song a name.");
+      yt.song.focus();
+      return;
+    }
+    yt.save.disabled = true;
+    try {
+      const { ok, data } = await ytPost("/youtube/save", {
+        id: ytJob.id, song: yt.song.value, artist: yt.artist.value,
+      });
+      if (!ok) {
+        renderYt(data.error || "Couldn't save the song.");
+        return;
+      }
+      ytJob = data;
+      if (ytSettle()) return;
+      renderYt();
+      if (YT_RUNNING.includes(ytJob.state)) ytPoll();
+    } catch {
+      renderYt("Can't reach the Pi. Check that it's on and connected to Wi-Fi.");
+    }
+  }
+
+  function ytClose() {
+    const j = ytJob;
+    if (ytActive(j)) ytPost("/youtube/cancel", { id: j.id }).catch(() => {}); // deletes what was downloaded
+    ytJob = null;
+    clearTimeout(ytTimer);
+    try { sessionStorage.removeItem("rpi-music-yt"); } catch {}
+    yt.dialog.close();
+  }
+
+  async function ytOpen() {
+    if (!yt.dialog.open) yt.dialog.showModal();
+    if (!ytJob) {
+      yt.url.value = "";
+      renderYt();
+      yt.url.focus();
+    }
+    try {
+      const data = await (await api("/youtube")).json();
+      ytMissing = data.missing || [];
+      let mine = null;
+      try { mine = sessionStorage.getItem("rpi-music-yt"); } catch {}
+      if (!ytJob && ytActive(data) && data.id === mine) {
+        ytJob = data; // this tab's download, still going after a reload
+        renderYt();
+        ytPoll();
+      } else if (!ytJob) {
+        renderYt(ytMissing.length
+          ? `The Pi needs ${ytMissing.join(" and ")} for this. On the Pi, run "sudo bash setup.sh" again, then restart the app.`
+          : "");
+      }
+    } catch {
+      if (!ytJob) renderYt("Can't reach the Pi. Check that it's on and connected to Wi-Fi.");
+    }
+  }
+
+  yt.form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (ytActive(ytJob)) ytSave(); // Enter in the name boxes saves
+    else ytStart();
+  });
+  yt.save.addEventListener("click", ytSave);
+  yt.cancel.addEventListener("click", ytClose);
+  yt.dialog.addEventListener("cancel", (e) => { e.preventDefault(); ytClose(); }); // Esc key
+  for (const key of ["song", "artist"]) {
+    yt[key].addEventListener("input", () => { ytEdited[key] = true; renderYt(); });
+  }
+  $("yt-btn").addEventListener("click", ytOpen);
+  $("empty-yt-btn").addEventListener("click", ytOpen);
+
   // ---------- buttons, search, keys ----------
   $("play-btn").addEventListener("click", togglePlay);
   $("mini-play").addEventListener("click", togglePlay);
@@ -389,6 +817,7 @@
   document.addEventListener("keydown", (e) => {
     const tag = (e.target.tagName || "").toLowerCase();
     if (e.metaKey || e.ctrlKey || e.altKey || tag === "input" || tag === "textarea") return;
+    if (document.querySelector("dialog[open]")) return;
     if (e.key === " " && tag !== "button") { e.preventDefault(); togglePlay(); }
     else if (e.key === "ArrowRight") { e.preventDefault(); step(1); }
     else if (e.key === "ArrowLeft") { e.preventDefault(); step(-1); }
@@ -482,10 +911,11 @@
   else window.addEventListener("resize", sizeScreen);
 
   // stop streaming and polling while the tab is in the background, to spare the Pi
+  // (keep polling if this device is playing the sound, so it stays in step)
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
       disconnectScreen();
-      stopPolling();
+      if (!listening()) stopPolling();
     } else {
       connectScreen();
       startPolling();
@@ -498,4 +928,14 @@
   loadLibrary().then(poll);
   startPolling();
   connectScreen();
+  // reopen the YouTube dialog if this tab was in the middle of a download
+  try {
+    const mine = sessionStorage.getItem("rpi-music-yt");
+    if (mine) {
+      api("/youtube").then((r) => r.json()).then((d) => {
+        if (d.id === mine && ytActive(d)) ytOpen();
+        else sessionStorage.removeItem("rpi-music-yt");
+      }).catch(() => {});
+    }
+  } catch {}
 })();
