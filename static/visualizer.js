@@ -134,18 +134,28 @@
     render();
   }
 
+  const YT_LINK = /^(https?:\/\/)?([a-z0-9-]+\.)?(youtube\.com|youtu\.be)\//i;
+
   function applySearch() {
     const q = $("search").value.trim().toLowerCase();
+    const ytLink = YT_LINK.test(q); // a YouTube link pasted into search: offer to download it
     let shown = 0;
     for (const song of library) {
-      const hit = !q || `${song.title} ${song.artist} ${song.filename}`.toLowerCase().includes(q);
+      const hit = !ytLink && (!q || `${song.title} ${song.artist} ${song.filename}`.toLowerCase().includes(q));
       tiles.get(song.filename).hidden = !hit;
       if (hit) shown++;
     }
     $("empty-library").hidden = library.length > 0;
     document.querySelector(".library-bar").hidden = !library.length;
     $("empty-search").hidden = !(library.length && q && !shown);
-    if (q && !shown) $("empty-search-title").textContent = `No songs match "${$("search").value.trim()}"`;
+    $("search-yt-btn").hidden = !ytLink;
+    if (ytLink) {
+      $("empty-search-title").textContent = "That's a YouTube link";
+      $("empty-search-text").textContent = "Download it to add the song to your library.";
+    } else if (q && !shown) {
+      $("empty-search-title").textContent = `No songs match "${$("search").value.trim()}"`;
+      $("empty-search-text").textContent = "Try part of a title or an artist's name.";
+    }
     $("count").textContent = !library.length ? "" : q ? `${shown} of ${library.length}` : plural(library.length, "song");
   }
 
@@ -263,10 +273,14 @@
     } else if (!status.listener && status.speakerOk === false) {
       warn = true;
       const name = SPEAKER_NAMES[status.speaker];
+      const seen = (status.speakerCards || [])[0];
       if (status.speakerError === "busy") {
-        text = `Another program on the Pi is using the ${name.toLowerCase()}. Restart the Pi, then tap ${name}.`;
+        text = `Another program on the Pi is using the ${status.speaker === "usb" ? "USB speaker" : "headphone jack"}. Restart the Pi, then tap ${name}.`;
+      } else if (status.speaker === "usb" && status.speakerError === "failed" && seen) {
+        text = `The Pi sees "${seen}" but can't play through it. Unplug it, plug it back in, then tap USB speaker.`;
       } else if (status.speaker === "usb") {
-        text = `Can't find the USB speaker. Plug it in and tap USB speaker, or tap ${HERE_LABEL} to hear it here.`;
+        text = "The Pi doesn't see a USB speaker. Plug one in (on a Pi Zero, use the port marked USB, not PWR) " +
+          `and it's used automatically. Or tap ${HERE_LABEL} to hear it here.`;
       } else {
         text = "Can't use the headphone jack. Tap Headphone jack to try again, or pick another option.";
       }
@@ -281,7 +295,7 @@
     status = {
       ...status,
       speaker: data.mode, speakerOk: data.ok, speakerError: data.error,
-      hasJack: data.hasJack, listener: data.listener,
+      speakerCards: data.cards, hasJack: data.hasJack, listener: data.listener,
     };
   }
 
@@ -794,6 +808,15 @@
   }
   $("yt-btn").addEventListener("click", ytOpen);
   $("empty-yt-btn").addEventListener("click", ytOpen);
+  $("search-yt-btn").addEventListener("click", async () => {
+    const url = $("search").value.trim();
+    $("search").value = "";
+    applySearch();
+    await ytOpen();
+    if (ytJob) return; // a download is already going
+    yt.url.value = /^https?:/i.test(url) ? url : "https://" + url;
+    ytStart();
+  });
 
   // ---------- buttons, search, keys ----------
   $("play-btn").addEventListener("click", togglePlay);
