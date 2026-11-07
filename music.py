@@ -11,7 +11,7 @@ from mutagen import File
 from queue import Queue
 import re
 import yaml
-import json, shutil, signal, sys, secrets, importlib.util
+import json, shutil, signal, sys, secrets, importlib.util, tempfile, collections
 
 # --- OLED Setup ---
 disp = SSD1305.SSD1305()
@@ -62,6 +62,7 @@ def save_config():
     cfg = config if isinstance(config, dict) else {}
     audio = cfg.get("audio") if isinstance(cfg.get("audio"), dict) else {}
     audio["jackInput"] = bool(jackInput)
+    audio["source"] = globals().get("source", "songs")
     cfg["audio"] = audio
     tmp = CONFIG_PATH + ".tmp"
     with open(tmp, "w") as f:
@@ -226,6 +227,15 @@ def sound_cards():
     return cards
 
 
+def card_streams(num):
+    """(can play, can record) for a sound card. A card that can't be checked counts as play-only."""
+    base = os.path.join(os.path.dirname(ASOUND_CARDS), f"card{num}")
+    if not os.path.isdir(base):
+        return True, False
+    return (bool(glob.glob(os.path.join(base, "pcm*p"))),
+            bool(glob.glob(os.path.join(base, "pcm*c"))))
+
+
 def has_jack():
     """True if the Pi has a headphone jack (or the card list can't be read)."""
     if not os.path.exists(ASOUND_CARDS):
@@ -279,7 +289,8 @@ def init_audio():
     global audio_ok, audio_error
     # the card name that worked before first, then every USB sound card the Pi can see
     devices = ["plughw:CARD=Audio,DEV=0"]
-    usb_cards = [name for _, name, driver, _ in sound_cards() if driver == "USB-Audio"]
+    usb_cards = [name for num, name, driver, _ in sound_cards()
+                 if driver == "USB-Audio" and card_streams(num)[0]]
     for name in usb_cards:
         dev = f"plughw:CARD={name},DEV=0"
         if dev not in devices:
@@ -400,6 +411,9 @@ visualizer_thread = None
 def play_song(user_input=None):
     global music_visualizer_active, bar_heights, current_index, current_song_path
     global play_gen, music_paused
+
+    if globals().get("source", "songs") != "songs":
+        set_source("songs")  # picking a song switches back from the microphone or Bluetooth
 
     # --- Gracefully stop any current playback ---
     play_gen += 1
@@ -837,11 +851,15 @@ def youtube_cleanup(job):
     shutil.rmtree(job["dir"], ignore_errors=True)
 
 
+def youtube_filename(song, artist):
+    return f"{song} - {artist}.mp3" if artist else f"{song}.mp3"
+
+
 def youtube_finish(job):
     """Tag the MP3, give it the chosen name and move it into Music/. Call with yt_lock held."""
     song = clean_name(job["wanted"][0], 80)
     artist = clean_name(job["wanted"][1], 60)
-    filename = f"{song} - {artist}.mp3" if artist else f"{song}.mp3"
+    filename = youtube_filename(song, artist)
     dest = os.path.join(MUSIC_DIR, filename)
     if os.path.exists(dest):
         job["error"] = f'There\'s already a song called "{filename[:-4]}". Change the name.'
@@ -991,6 +1009,10 @@ def youtube_save():
             return jsonify({"error": "This download is no longer running. Start it again."}), 404
         if not song:
             return jsonify({"error": "Give the song a name."}), 400
+        filename = youtube_filename(song, artist)
+        if os.path.exists(os.path.join(MUSIC_DIR, filename)):
+            # say so now, before you move on and the download finishes in the background
+            return jsonify({"error": f'There\'s already a song called "{filename[:-4]}". Change the name.'}), 409
         job["wanted"] = (song, artist)
         job["error"] = None
         if job["state"] == "ready":
@@ -1060,7 +1082,8 @@ def apply_volume():
 
 def usb_speakers():
     """Names of the USB speakers the Pi can see, e.g. ["USB2.0 Device"]."""
-    return [long_name for _, _, driver, long_name in sound_cards() if driver == "USB-Audio"]
+    return [long_name for num, _, driver, long_name in sound_cards()
+            if driver == "USB-Audio" and card_streams(num)[0]]
 
 
 def speaker_watch():
@@ -1073,7 +1096,7 @@ def speaker_watch():
                 tried = None
                 continue
             cards = tuple(usb_speakers())
-            if jackInput or listener or not cards or cards == tried:
+            if source != "songs" or jackInput or listener or not cards or cards == tried:
                 continue  # nothing new to try (a failed speaker is retried once it's replugged)
             tried = cards
             song = current_song_path if (pygame.mixer.music.get_busy() or music_paused) else None
@@ -1087,6 +1110,335 @@ def speaker_watch():
 
 
 threading.Thread(target=speaker_watch, daemon=True, name="SpeakerWatch").start()
+
+
+# ---------- Other sound sources: microphone or cable, and Bluetooth ----------
+# "songs":     the Pi plays its own songs (as before).
+# "input":     a USB microphone, or a cable into a USB sound card; the bars follow what it hears.
+# "bluetooth": the Pi is a Bluetooth speaker for a phone or TV; the sound plays through its
+#              speaker and the bars follow it.
+SOURCES = ("songs", "input", "bluetooth")
+saved_source = config.get("audio", {}).get("source", "songs") if isinstance(config, dict) else "songs"
+source = "songs"            # switched to saved_source once the app has started
+source_lock = threading.Lock()
+LIVE_RATE = 44100
+LIVE_WINDOW = 1600          # samples behind each frame of bars (about the same as for songs)
+LIVE_CHUNK = 1470           # samples per read (1/30 s)
+live = {"input": None, "inputOk": False, "inputError": None,
+        "bt": "off", "btDevice": None, "btAlias": None, "btSpeakerOk": None}
+live_stop = threading.Event()
+live_thread = None
+live_procs = []             # recording / playing programs, stopped when the source changes
+
+
+def input_devices():
+    """Microphones and sound-card inputs the Pi can see: [(name, long name)]."""
+    return [(name, long_name) for num, name, _, long_name in sound_cards() if card_streams(num)[1]]
+
+
+def draw_bars(heights):
+    """Same bars as for songs."""
+    with display_lock:
+        draw.rectangle((0, 0, WIDTH, HEIGHT), outline=0, fill=0)
+        for i, h in enumerate(heights):
+            bar_h = min(HEIGHT, int(h * HEIGHT * 1.5))
+            x = i * (bar_width + 1)
+            draw.rectangle([x, HEIGHT - bar_h, x + bar_width - 1, HEIGHT], fill=255)
+        buffer()
+
+
+class LiveBars:
+    """Bars from live sound. Sensitivity adjusts by itself, so a quiet room and a loud cable
+    both fill the screen. The steady background hiss of a microphone is learned and left out,
+    so silence stays near zero."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.window = np.zeros(LIVE_WINDOW, dtype=np.float32)
+        self.heights = np.zeros(num_bars)
+        self.peak = 0.0
+        self.levels = collections.deque(maxlen=250)  # overall level of the last ~10 s of frames
+        self.samples = 0
+        self.last_draw = 0.0
+        self.fed = 0.0
+
+    def feed(self, samples, real=True):
+        with self.lock:
+            now = time.monotonic()
+            if real:
+                self.fed = now
+            s = np.abs(np.asarray(samples, dtype=np.float32))
+            self.samples += len(s)
+            if len(s) >= LIVE_WINDOW:
+                self.window = s[-LIVE_WINDOW:]
+            else:
+                self.window = np.concatenate((self.window[len(s):], s))
+            if now - self.last_draw < FRAME_TIME:
+                return
+            frames = min((now - self.last_draw) / FRAME_TIME, 25) if self.last_draw else 1
+            self.last_draw = now
+            seg = LIVE_WINDOW // num_bars
+            raw = self.window[:seg * num_bars].reshape(num_bars, seg).mean(axis=1) / 32768.0
+            if self.samples >= LIVE_WINDOW:  # start learning once real sound fills the window
+                self.levels.append(float(raw.mean()))
+            # background hiss = the quietest moments of the last ~10 s; left out of the bars
+            noise = float(np.percentile(self.levels, 10)) if self.levels else 0.0
+            signal = np.maximum(raw - noise * 1.2, 0.0)
+            self.peak = max(self.peak * (0.995 ** frames), float(signal.max()))
+            levels = np.minimum(signal * (0.55 / max(self.peak, 0.006)), 1.0)
+            self.heights = np.maximum(levels, self.heights * (decay ** frames))
+            heights = self.heights.copy()
+        draw_bars(heights)
+
+    def ticker(self, stop):
+        """Let the bars fall when no sound arrives (a paused phone sends nothing)."""
+        silence = np.zeros(LIVE_WINDOW // 4, dtype=np.int16)
+        while not stop.wait(FRAME_TIME):
+            if time.monotonic() - self.fed > 0.25:
+                self.feed(silence, real=False)
+
+
+def live_proc(cmd, stdin=False, stderr=None):
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL if stdin else subprocess.PIPE,
+                            stderr=stderr or subprocess.DEVNULL, bufsize=0, start_new_session=True)
+    live_procs.append(proc)
+    return proc
+
+
+def end_proc(proc):
+    if proc is None:
+        return
+    if proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=2)
+        except (ProcessLookupError, PermissionError):
+            pass
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+    if proc in live_procs:
+        live_procs.remove(proc)
+
+
+def pcm_chunks(proc, nbytes, frame_bytes):
+    """Whole frames of raw sound from a recording program, as they arrive."""
+    rest = b""
+    while True:
+        data = proc.stdout.read(nbytes)
+        if not data:
+            return
+        data = rest + data
+        cut = len(data) - len(data) % frame_bytes
+        rest = data[cut:]
+        if cut:
+            yield data[:cut]
+
+
+def error_text(err_file):
+    try:
+        err_file.seek(0)
+        return err_file.read().decode("utf-8", "replace").strip()
+    except Exception:
+        return ""
+
+
+def run_quiet(cmd, timeout=5):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
+    except Exception:
+        return ""
+
+
+def input_worker(stop):
+    """Listen to the first microphone or sound-card input and draw what it hears."""
+    bars = LiveBars()
+    threading.Thread(target=bars.ticker, args=(stop,), daemon=True).start()
+    while not stop.is_set():
+        devices = input_devices()
+        if not devices:
+            live.update(input=None, inputOk=False, inputError=None)
+            stop.wait(2)
+            continue
+        name, long_name = devices[0]
+        live["input"] = long_name  # the last error stays shown until sound arrives
+        err = tempfile.TemporaryFile()
+        rec = live_proc(["arecord", "-q", "-D", f"plughw:CARD={name},DEV=0", "-f", "S16_LE",
+                         "-c", "1", "-r", str(LIVE_RATE), "-t", "raw"], stderr=err)
+        for data in pcm_chunks(rec, LIVE_CHUNK * 2, 2):
+            if stop.is_set():
+                break
+            if not live["inputOk"]:
+                live.update(inputOk=True, inputError=None)
+            bars.feed(np.frombuffer(data, dtype="<i2"))
+        end_proc(rec)
+        if not stop.is_set():
+            text = error_text(err)
+            print(f"[Input {long_name} stopped] {text}")
+            live.update(inputOk=False, inputError="busy" if "busy" in text.lower() else "failed")
+            stop.wait(2)
+
+
+def bt_ctl(*args):
+    return run_quiet(["bluetoothctl", *args])
+
+
+def bt_connected():
+    """(address, name) of the connected Bluetooth device, or None."""
+    for line in bt_ctl("devices", "Connected").splitlines():
+        m = re.match(r"Device\s+([0-9A-F:]{17})\s+(.+)", line.strip(), re.I)
+        if m:
+            return m.group(1), m.group(2).strip()
+    return None
+
+
+def speaker_devices():
+    """Where to play Bluetooth sound: the speaker chosen on the page, found the same way as for songs."""
+    if jackInput:
+        return ["plughw:CARD=Headphones,DEV=0"] + [f"plughw:{n},0" for n in range(5)]
+    devices = ["plughw:CARD=Audio,DEV=0"]
+    for num, name, driver, _ in sound_cards():
+        dev = f"plughw:CARD={name},DEV=0"
+        if driver == "USB-Audio" and card_streams(num)[0] and dev not in devices:
+            devices.append(dev)
+    return devices
+
+
+def bt_player():
+    for dev in speaker_devices():
+        player = live_proc(["aplay", "-q", "-D", dev, "-f", "S16_LE", "-c", "2", "-r", str(LIVE_RATE),
+                            "-t", "raw", "--buffer-time=150000"], stdin=True)
+        time.sleep(0.3)  # a speaker that's missing fails straight away
+        if player.poll() is None:
+            print(f"[Bluetooth sound to {dev}]")
+            return player
+        end_proc(player)
+    return None
+
+
+def bluetooth_worker(stop):
+    """Be a Bluetooth speaker: take sound from a phone or TV, play it, and draw it."""
+    if not shutil.which("bluetoothctl") or not shutil.which("arecord"):
+        live["bt"] = "unavailable"
+        return
+    bars = LiveBars()
+    threading.Thread(target=bars.ticker, args=(stop,), daemon=True).start()
+    # visible and accepting phones only while Bluetooth is chosen on the page
+    for args in (("power", "on"), ("discoverable-timeout", "0"), ("pairable", "on"), ("discoverable", "on")):
+        bt_ctl(*args)
+    m = re.search(r"^\s*Alias:\s*(.+)$", bt_ctl("show"), re.M)
+    live["btAlias"] = m.group(1).strip() if m else None
+    agent = live_proc(["bt-agent", "-c", "NoInputNoOutput"]) if shutil.which("bt-agent") else None
+    live.update(bt="waiting", btDevice=None, btSpeakerOk=None)
+    try:
+        while not stop.is_set():
+            device = bt_connected()
+            live["btDevice"] = device[1] if device else None
+            if device:
+                bt_ctl("trust", device[0])  # so it can reconnect later without asking
+            err = tempfile.TemporaryFile()
+            rec = live_proc(["arecord", "-q", "-D", "plug:bluealsa", "-f", "S16_LE", "-c", "2",
+                             "-r", str(LIVE_RATE), "-t", "raw"], stderr=err)
+            player, tried = None, 0.0
+            for data in pcm_chunks(rec, LIVE_CHUNK * 4, 4):
+                if stop.is_set():
+                    break
+                now = time.monotonic()
+                if live["bt"] != "connected":
+                    live["bt"] = "connected"
+                    device = bt_connected()
+                    live["btDevice"] = device[1] if device else live["btDevice"]
+                samples = np.frombuffer(data, dtype="<i2")
+                bars.feed(samples.reshape(-1, 2).mean(axis=1))
+                if live.pop("restartPlayer", False):
+                    end_proc(player)
+                    player, tried = None, 0.0
+                if player is None and now - tried > 5:  # (re)try the speaker every few seconds
+                    tried = now
+                    player = bt_player()
+                    live["btSpeakerOk"] = player is not None
+                if player is not None:
+                    volume = 0.0 if listener else music_volume
+                    out = data if volume >= 0.999 else (samples * volume).astype("<i2").tobytes()
+                    try:
+                        player.stdin.write(out)
+                    except (BrokenPipeError, OSError):
+                        end_proc(player)
+                        player = None
+                        live["btSpeakerOk"] = False
+            end_proc(rec)
+            end_proc(player)
+            if stop.is_set():
+                break
+            text = error_text(err).lower()
+            if "unknown pcm" in text or ("bluealsa" in text and ("service" in text or "connect" in text)):
+                live["bt"] = "unavailable"  # Bluetooth audio isn't installed or running
+                print(f"[Bluetooth audio not available] {text[:200]}")
+            else:
+                live["bt"] = "waiting"
+            live["btDevice"] = None
+            stop.wait(2)
+    finally:
+        bt_ctl("discoverable", "off")
+        bt_ctl("pairable", "off")
+        end_proc(agent)
+        live.update(bt="off", btDevice=None)
+
+
+def set_source(new):
+    """Switch between songs, microphone/cable and Bluetooth."""
+    global source, listener, live_thread, live_stop, play_gen, music_visualizer_active, music_paused
+    if new not in SOURCES:
+        return False
+    with source_lock:
+        old = source
+        if new == old and (new == "songs" or (live_thread and live_thread.is_alive())):
+            return True
+        live_stop.set()
+        for proc in list(live_procs):
+            end_proc(proc)
+        if live_thread:
+            live_thread.join(timeout=5)
+        live_thread = None
+        if new != "songs":
+            play_gen += 1  # stop the songs and their bars
+            music_visualizer_active = False
+            music_paused = False
+            with mixer_lock:
+                try:
+                    pygame.mixer.music.stop()
+                except pygame.error:
+                    pass
+            listener = None
+        source = new
+        if new == "bluetooth":
+            with mixer_lock:  # free the speaker for the Bluetooth sound
+                try:
+                    pygame.mixer.quit()
+                except pygame.error:
+                    pass
+                silent_mode()
+        elif old == "bluetooth":
+            switch_audio(jackInput)  # take the speaker back for songs
+        clear_display()
+        if new != "songs":
+            live_stop = threading.Event()
+            worker = input_worker if new == "input" else bluetooth_worker
+            live_thread = threading.Thread(target=worker, args=(live_stop,), daemon=True, name=f"Live-{new}")
+            live_thread.start()
+        try:
+            save_config()
+        except Exception as e:
+            print(f"[Could not save {CONFIG_PATH}: {e}]")
+        print(f"[Source: {new}]")
+        return True
+
+
+if saved_source in SOURCES and saved_source != "songs":
+    threading.Timer(1.5, set_source, args=(saved_source,)).start()  # carry on where it was left
 
 
 def speaker_info():
@@ -1104,10 +1456,10 @@ def speaker_info():
 def audio_mode():
     """GET /audio_mode tells where sound plays.
     ?set=usb or ?set=jack plays it on the Pi; ?set=browser&client=<id> plays it in that browser tab."""
-    global listener
+    global listener, jackInput
     choice = request.args.get("set")
     result = {}
-    if choice == "browser":
+    if choice == "browser" and source == "songs":
         client = request.args.get("client", "")
         if re.fullmatch(r"[A-Za-z0-9_-]{1,40}", client):
             listener = client
@@ -1116,7 +1468,17 @@ def audio_mode():
     elif choice in ("usb", "jack"):
         listener = None
         want_jack = choice == "jack"
-        if want_jack == jackInput and audio_ok:
+        if source == "bluetooth":
+            # Bluetooth sound has its own player: just point it at the other speaker
+            jackInput = want_jack
+            live["restartPlayer"] = True
+            try:
+                save_config()
+                result["saved"] = True
+            except Exception:
+                result["saved"] = False
+            result["restarted"] = False
+        elif want_jack == jackInput and audio_ok:
             apply_volume()  # same speaker and it works: carry on playing, just unmute
             result["saved"], result["restarted"] = True, False
         else:
@@ -1177,6 +1539,14 @@ def player_state():
         "speakerOk": audio_ok,
         "speakerError": audio_error,
         "speakerCards": usb_speakers(),
+        "source": source,
+        "inputName": live["input"],
+        "inputOk": live["inputOk"],
+        "inputError": live["inputError"],
+        "bt": live["bt"],
+        "btDevice": live["btDevice"],
+        "btAlias": live["btAlias"],
+        "btSpeakerOk": live["btSpeakerOk"],
         "hasJack": has_jack(),
         "listener": listener,
     })
@@ -1190,6 +1560,15 @@ def set_volume():
         music_volume = max(0.0, min(1.0, level))
         apply_volume()
     return jsonify({"volume": round(music_volume, 2)})
+
+
+@app.route("/source")
+def source_route():
+    """?set=songs, ?set=input (microphone or cable) or ?set=bluetooth."""
+    choice = request.args.get("set")
+    if choice in SOURCES:
+        set_source(choice)
+    return player_state()
 
 
 @app.route("/screen")
