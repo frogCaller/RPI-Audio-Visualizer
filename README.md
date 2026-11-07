@@ -11,6 +11,7 @@ A small music player for the Raspberry Pi with a 2.23" OLED HAT. Bars on the scr
 - **OLED visualizer:** bars that follow the music, at a steady 25 fps.
 - **Web page:** play, pause, skip, random song, volume, and search your library.
 - **Live screen view:** the web page shows exactly what's on the OLED.
+- **Other sound sources:** a USB microphone, a cable from a TV into a USB sound card, or Bluetooth from a phone or TV. The bars follow whatever is playing.
 - **Add songs from the page:** drag and drop files, use Add songs, or get a song from YouTube as an MP3.
 - **Cover art:** fetched and saved automatically.
 
@@ -20,6 +21,7 @@ A small music player for the Raspberry Pi with a 2.23" OLED HAT. Bars on the scr
 * [2.23" OLED HAT](https://amzn.to/3V2gCKb)
 * [UPS HAT (C)](https://amzn.to/4oGmKnB) (optional, for battery power)
 * [Mini speaker](https://amzn.to/43DTbL4)
+* USB microphone or USB sound card with an input (optional, for Mic or cable). A Pi Zero has one USB port, so use a small USB hub for more than one device.
 
 (Amazon affiliate links)
 
@@ -45,6 +47,8 @@ python3 start.py
 ```
 Then open `http://<your-pi-ip>:5000` on a phone or computer on the same Wi-Fi. If you don't know the Pi's IP, run `hostname -I`.
 
+**Play from:** at the top of the player, pick **Songs**, **Mic or cable** (the bars follow what a USB microphone hears, or a cable into a USB sound card), or **Bluetooth** (the Pi shows up as a Bluetooth speaker for a phone or TV; needs Raspberry Pi OS Lite). The Pi remembers your choice.
+
 **Choosing where the sound plays:** tap **USB speaker**, **Headphone jack** (on Pis that have one), or **This computer** / **This phone** to hear it on the device you're using. The screen on the Pi keeps moving either way.
 
 **Adding songs:** drop MP3, WAV, FLAC or M4A files onto the page, or copy them into the `Music/` folder. For cover art to be found, name files like `Song Name - Artist.mp3`, for example `Blinding Lights - The Weeknd.mp3`.
@@ -57,6 +61,7 @@ Then open `http://<your-pi-ip>:5000` on a phone or computer on the same Wi-Fi. I
 - **Screen stays blank:** check that SPI and I2C are on and the HAT is pressed all the way down.
 - **No sound:** check the speaker choice on the web page. If it says it can't find the speaker, plug it in and tap it again, or tap **This computer** to listen on your device.
 - **Page won't load:** make sure your device is on the same network as the Pi and the address ends in `:5000`.
+- **Phone or TV can't find the Pi over Bluetooth:** pick **Bluetooth** on the page first. The Pi only shows up while it's chosen. After running setup, restart the Pi once.
 - **YouTube downloads stop working:** YouTube changes often. Run `sudo bash setup.sh` again to update the downloader.
 - More about the screen: [Waveshare 2.23" OLED HAT wiki](https://www.waveshare.com/wiki/2.23inch_OLED_HAT)
 
