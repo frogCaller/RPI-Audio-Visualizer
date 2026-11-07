@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, request, Response
+from flask import Flask, render_template, jsonify, request, Response, send_from_directory
 from PIL import Image, ImageDraw
 import base64
 from drive import SSD1305
@@ -11,6 +11,7 @@ from mutagen import File
 from queue import Queue
 import re
 import yaml
+import json, shutil, signal, sys, secrets, importlib.util
 
 # --- OLED Setup ---
 disp = SSD1305.SSD1305()
@@ -28,18 +29,22 @@ os.makedirs(MUSIC_DIR, exist_ok=True)
 COVERS_DIR = 'static/covers'
 DEFAULT_COVER = '/static/covers/default_art.png'
 
-display_lock = threading.RLock()
-samples_lock = threading.Lock()
-mixer_lock = threading.Lock()
-last_frame = None
-play_gen = 0
-frame_cond = threading.Condition()
-frame_seq = 0
-music_volume = 1.0
-song_lengths = {}
+display_lock = threading.RLock()   # one thread talks to the OLED at a time
+samples_lock = threading.Lock()    # one song decode at a time
+mixer_lock = threading.Lock()      # never decode a Sound while music.load() runs
+last_frame = None                  # last bytes sent to the OLED
+play_gen = 0                       # bumps on every new song; old visualizer threads exit
+frame_cond = threading.Condition() # wakes the web page's live screen view
+frame_seq = 0                      # counts frames sent to the OLED
+music_volume = 1.0                 # kept here because pygame resets volume on load
+song_lengths = {}                  # song path -> length in seconds
+audio_ok = False                   # False when no speaker could be opened (silent mode)
+audio_error = None                 # "missing" or "busy" when audio_ok is False
+listener = None                    # browser tab playing the sound itself, or None for the Pi
+CONFIG_PATH = "config.yaml"
 
 
-def load_config(path="config.yaml"):
+def load_config(path=CONFIG_PATH):
     try:
         with open(path, "r") as f:
             return yaml.safe_load(f)
@@ -50,6 +55,18 @@ def load_config(path="config.yaml"):
 config = load_config()
 
 jackInput = config.get("audio", {}).get("jackInput", False)
+
+
+def save_config():
+    """Remember the speaker choice made on the web page."""
+    cfg = config if isinstance(config, dict) else {}
+    audio = cfg.get("audio") if isinstance(cfg.get("audio"), dict) else {}
+    audio["jackInput"] = bool(jackInput)
+    cfg["audio"] = audio
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
+    os.replace(tmp, CONFIG_PATH)
 
 def safe_filename(name):
     return re.sub(r'[^A-Za-z0-9._-]+', '_', name)
@@ -191,46 +208,109 @@ def clear_display():
         buffer(force=True)
 
     
+ASOUND_CARDS = "/proc/asound/cards"
+
+
+def sound_cards():
+    """Sound cards the Pi can see: [(number, name, driver)], e.g. (1, "Audio", "USB-Audio")."""
+    cards = []
+    try:
+        with open(ASOUND_CARDS) as f:
+            for line in f:
+                m = re.match(r"\s*(\d+)\s+\[(\S+)\s*\]:\s*(\S+)", line)
+                if m:
+                    cards.append((int(m.group(1)), m.group(2), m.group(3)))
+    except OSError:
+        pass
+    return cards
+
+
+def has_jack():
+    """True if the Pi has a headphone jack (or the card list can't be read)."""
+    if not os.path.exists(ASOUND_CARDS):
+        return True
+    return any(name in ("Headphones", "ALSA") or driver.startswith("bcm2835")
+               for _, name, driver in sound_cards())
+
+
+def silent_mode():
+    """No speaker could be opened: keep everything running without sound."""
+    os.environ["SDL_AUDIODRIVER"] = "dummy"
+    time.sleep(0.5)
+    pygame.mixer.init()
+
+
 def init_audio_jack():
+    global audio_ok, audio_error
     try:
         os.environ["SDL_AUDIODRIVER"] = "alsa"
+
+        # the Pi's own headphone jack by name first, if it has one
+        if any(name == "Headphones" for _, name, _ in sound_cards()):
+            try:
+                pygame.mixer.init(frequency=48000, size=-16, channels=2, buffer=2048,
+                                  devicename="plughw:CARD=Headphones,DEV=0")
+                print("[Audio: headphone jack]")
+                audio_ok, audio_error = True, None
+                return
+            except Exception as e:
+                print(f"[Headphone jack failed: {e}]")
 
         for card in range(5):
             try:
                 test_dev = f"plughw:{card},0"
                 pygame.mixer.init(frequency=48000, size=-16, channels=2, buffer=2048, devicename=test_dev)
+                audio_ok, audio_error = True, None
                 return
             except Exception as e:
                 continue
 
         pygame.mixer.init(frequency=48000, size=-16, channels=2, buffer=2048)
+        audio_ok, audio_error = True, None
     except Exception as e:
-        os.environ["SDL_AUDIODRIVER"] = "dummy"
-        pygame.mixer.init()
-        
+        print(f"[Jack audio init failed: {e}] Using silent mode.")
+        audio_ok = False
+        audio_error = "busy" if "busy" in str(e).lower() else "missing"
+        silent_mode()
+
 
 def init_audio():
-    try:
-        os.environ["SDL_AUDIODRIVER"] = "alsa"
-        os.environ["AUDIODEV"] = "plughw:CARD=Audio,DEV=0"
-        pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
-    except Exception as e:
-        print(f"[Audio init failed: {e}]")
+    global audio_ok, audio_error
+    # the card name that worked before first, then every USB sound card the Pi can see
+    devices = ["plughw:CARD=Audio,DEV=0"]
+    usb_cards = [name for _, name, driver in sound_cards() if driver == "USB-Audio"]
+    for name in usb_cards:
+        dev = f"plughw:CARD={name},DEV=0"
+        if dev not in devices:
+            devices.append(dev)
 
+    errors = []
+    for dev in devices:
         try:
-            cards = subprocess.check_output(["aplay", "-l"], text=True)
-        except Exception:
-            print("[Could not list ALSA devices]")
-            
-        os.environ["SDL_AUDIODRIVER"] = "dummy"
-        time.sleep(0.5)
-        pygame.mixer.init()
-    
+            os.environ["SDL_AUDIODRIVER"] = "alsa"
+            os.environ["AUDIODEV"] = dev
+            pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+            print(f"[Audio: {dev}]")
+            audio_ok, audio_error = True, None
+            return
+        except Exception as e:
+            errors.append(f"{dev}: {e}")
 
-if jackInput:
-    init_audio_jack()
-else:
-    init_audio()
+    print("[Audio init failed] " + " | ".join(errors))
+    print("[USB sound cards found: " + (", ".join(usb_cards) or "none") + "] Using silent mode.")
+    audio_ok = False
+    audio_error = "busy" if any("busy" in e.lower() for e in errors) else "missing"
+    silent_mode()
+
+
+def start_audio():
+    if jackInput:
+        init_audio_jack()
+    else:
+        init_audio()
+
+
+start_audio()
     
 
 num_bars = WIDTH // 4
@@ -356,7 +436,7 @@ def play_song(user_input=None):
                     return  # another song was picked while waiting
                 pygame.mixer.music.load(chosen_song)
                 pygame.mixer.music.play()
-                pygame.mixer.music.set_volume(music_volume)
+                apply_volume()
             print(f"{os.path.basename(chosen_song)}")
         except Exception as e:
             print(f"[Audio playback error: {e}]")
@@ -654,9 +734,367 @@ def upload_song():
     #print(f"[Uploaded new song: {filename}]")
     return jsonify({"success": True, "filename": filename})
 
+# ---------- YouTube downloads ----------
+# yt-dlp downloads the audio into a working folder and converts it to MP3 with FFmpeg.
+# Only the MP3 is moved into Music/ (with the name you pick); everything else is deleted.
+YT_TMP = os.path.abspath(".youtube-tmp")
+YT_URL_RE = re.compile(r"^https?://([a-z0-9-]+\.)?(youtube\.com|youtu\.be)/", re.I)
+YT_ACTIVE = ("starting", "downloading", "converting")
+yt_job = None
+yt_lock = threading.Lock()
+shutil.rmtree(YT_TMP, ignore_errors=True)  # leftovers if the Pi was switched off mid-download
+
+YT_NOISE = re.compile(
+    r"\s*[\(\[\{][^\)\]\}]*\b(official|video|audio|lyrics?|visuali[sz]er|hd|hq|4k|mv|m/v)\b[^\)\]\}]*[\)\]\}]",
+    re.I)
+
+
+def youtube_missing():
+    """Programs the Pi still needs for YouTube downloads (empty when ready)."""
+    missing = []
+    if importlib.util.find_spec("yt_dlp") is None:
+        missing.append("yt-dlp")
+    if not shutil.which("ffmpeg"):
+        missing.append("FFmpeg")
+    return missing
+
+
+def clean_yt_title(text):
+    text = YT_NOISE.sub("", text or "")
+    text = text.split(" | ")[0]
+    return re.sub(r"\s+", " ", text).strip(" -–—_")
+
+
+def guess_names(info):
+    """Song name and artist from the video's details, to fill in the rename boxes."""
+    artists = info.get("artists") or info.get("creators") or []
+    artist = (artists[0] if artists else None) or info.get("artist") or info.get("creator")
+    track = info.get("track")
+    if track and artist:
+        return clean_yt_title(track), artist.split(",")[0].strip()
+    title = clean_yt_title(info.get("title"))
+    m = re.match(r"^(.+?)\s+[-–—]\s+(.+)$", title)  # "Artist - Song"
+    if m:
+        return m.group(2).strip(), m.group(1).strip()
+    channel = info.get("uploader") or info.get("channel") or ""
+    channel = re.sub(r"\s*-\s*Topic$|VEVO$", "", channel).strip()
+    return title, channel
+
+
+def clean_name(text, limit):
+    """Make a song or artist name safe to use in a file name."""
+    text = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "", text or "")
+    text = text.replace(" - ", " – ")  # " - " separates song and artist in the file name
+    return re.sub(r"\s+", " ", text).strip(" .")[:limit].strip()
+
+
+def youtube_error(lines):
+    text = "\n".join(lines)
+    low = text.lower()
+    if "no module named yt_dlp" in low:
+        return "The YouTube downloader isn't installed on the Pi. Run setup.sh again."
+    if "ffmpeg" in low and ("not found" in low or "not installed" in low):
+        return "FFmpeg isn't installed on the Pi. Run setup.sh again."
+    if "javascript runtime" in low or "js runtime" in low:
+        return "The Pi is missing Deno, which YouTube downloads need. Run setup.sh again."
+    if "confirm your age" in low or "age-restricted" in low or "age restricted" in low:
+        return "This video is age-restricted, so it can't be downloaded."
+    if "not a bot" in low:
+        return "YouTube is blocking downloads from this Pi for now. Try again later."
+    if "private video" in low:
+        return "This video is private."
+    if "video unavailable" in low or "is not available" in low:
+        return "This video isn't available."
+    if "http error 404" in low:
+        return "That video couldn't be found. Check the link."
+    if "http error 403" in low or "http error 429" in low:
+        return "YouTube is blocking downloads from this Pi for now. Try again later."
+    if any(s in low for s in ("unable to download webpage", "name or service not known",
+                              "temporary failure in name resolution", "network is unreachable",
+                              "failed to resolve")):
+        return "The Pi couldn't reach YouTube. Check its internet connection."
+    if "unsupported url" in low:
+        return "That link doesn't point to a YouTube video."
+    errors = [l for l in lines if l.startswith("ERROR:")]
+    detail = re.sub(r"^ERROR:\s*(\[[^\]]+\]\s*)*", "", errors[-1]) if errors else ""
+    return "Couldn't download this song." + (f" ({detail[:160]})" if detail else "")
+
+
+def youtube_public(job):
+    if job is None:
+        return {"state": "none"}
+    keys = ("id", "state", "percent", "song", "artist", "title", "error", "filename", "waiting")
+    return {k: job.get(k) for k in keys}
+
+
+def youtube_cleanup(job):
+    shutil.rmtree(job["dir"], ignore_errors=True)
+
+
+def youtube_finish(job):
+    """Tag the MP3, give it the chosen name and move it into Music/. Call with yt_lock held."""
+    song = clean_name(job["wanted"][0], 80)
+    artist = clean_name(job["wanted"][1], 60)
+    filename = f"{song} - {artist}.mp3" if artist else f"{song}.mp3"
+    dest = os.path.join(MUSIC_DIR, filename)
+    if os.path.exists(dest):
+        job["error"] = f'There\'s already a song called "{filename[:-4]}". Change the name.'
+        job["waiting"] = False
+        return False
+    try:
+        from mutagen.easyid3 import EasyID3
+        from mutagen.id3 import ID3NoHeaderError
+        try:
+            tags = EasyID3(job["mp3"])
+        except ID3NoHeaderError:
+            tags = EasyID3()
+        tags["title"] = song
+        if artist:
+            tags["artist"] = artist
+        elif "artist" in tags:
+            del tags["artist"]
+        tags.save(job["mp3"])
+    except Exception as e:
+        print(f"[Couldn't tag {filename}: {e}]")  # the file name still carries the names
+    os.makedirs(MUSIC_DIR, exist_ok=True)
+    shutil.move(job["mp3"], dest)
+    youtube_cleanup(job)
+    get_music_library.cache_clear()
+    job.update(state="saved", filename=filename, waiting=False, error=None)
+    print(f"[Added from YouTube: {filename}]")
+    return True
+
+
+def youtube_worker(job):
+    os.makedirs(job["dir"], exist_ok=True)
+    cmd = [sys.executable, "-m", "yt_dlp",
+           "--ignore-config", "--no-playlist",
+           "--js-runtimes", "deno", "--js-runtimes", "node",
+           "-f", "bestaudio/best",
+           "-x", "--audio-format", "mp3", "--audio-quality", "192K",
+           "--no-mtime",
+           "-o", os.path.join(job["dir"], "song.%(ext)s"),
+           "--newline", "--progress",
+           "--progress-template", "download:PROGRESS %(progress._percent_str)s",
+           "--print", "video:INFO %(.{title,track,artist,artists,creator,creators,uploader,channel})j",
+           "--print", "after_move:FILE %(filepath)s",
+           job["url"]]
+    if shutil.which("nice"):
+        cmd = ["nice", "-n", "10"] + cmd  # let the music and the screen go first
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    errors = []
+    with yt_lock:
+        if job["state"] == "cancelled":  # cancelled before it got going
+            youtube_cleanup(job)
+            return
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                    encoding="utf-8", errors="replace", bufsize=1,
+                                    start_new_session=True, env=env)
+        except Exception as e:
+            job.update(state="failed", error=f"Couldn't start the downloader ({e}).")
+            youtube_cleanup(job)
+            return
+        job["proc"] = proc
+
+    def read_errors():
+        for line in proc.stderr:
+            errors.append(line.strip())
+            del errors[:-40]
+    threading.Thread(target=read_errors, daemon=True).start()
+
+    for line in proc.stdout:
+        line = line.strip()
+        with yt_lock:
+            if job["state"] == "cancelled":
+                continue
+            if line.startswith("INFO "):
+                try:
+                    info = json.loads(line[5:])
+                    job["title"] = info.get("title")
+                    job["song"], job["artist"] = guess_names(info)
+                except ValueError:
+                    pass
+                if job["state"] == "starting":
+                    job["state"] = "downloading"
+            elif line.startswith("PROGRESS "):
+                m = re.search(r"([\d.]+)%", line)
+                if m:
+                    job["percent"] = min(100.0, float(m.group(1)))
+                    job["state"] = "converting" if job["percent"] >= 100 else "downloading"
+            elif line.startswith("FILE "):
+                job["mp3"] = line[5:].strip()
+    proc.wait()
+
+    with yt_lock:
+        if job["state"] == "cancelled":
+            pass
+        elif proc.returncode == 0 and job.get("mp3") and os.path.isfile(job["mp3"]):
+            job.update(state="ready", percent=100.0)
+            if job.get("waiting"):
+                youtube_finish(job)
+        else:
+            job.update(state="failed", error=youtube_error(errors))
+            print("[YouTube download failed] " + " | ".join(errors[-3:]))
+    if job["state"] in ("cancelled", "failed"):
+        youtube_cleanup(job)
+
+
+@app.route("/youtube")
+def youtube_status():
+    with yt_lock:
+        data = youtube_public(yt_job)
+    data["missing"] = youtube_missing()
+    return jsonify(data)
+
+
+@app.route("/youtube/start", methods=["POST"])
+def youtube_start():
+    global yt_job
+    url = ((request.get_json(silent=True) or {}).get("url") or "").strip()
+    if not YT_URL_RE.match(url):
+        return jsonify({"error": "That doesn't look like a YouTube link. Copy the link from the video's Share button."}), 400
+    if "/playlist" in url and "v=" not in url:
+        return jsonify({"error": "That's a link to a playlist. Paste a link to one song."}), 400
+    missing = youtube_missing()
+    if missing:
+        return jsonify({"error": "The Pi needs " + " and ".join(missing) + " for this. Run setup.sh again."}), 400
+    with yt_lock:
+        if yt_job and yt_job["state"] in YT_ACTIVE:
+            return jsonify({"error": "Another song is downloading. Wait for it to finish."}), 409
+        if yt_job and yt_job["state"] == "ready":
+            youtube_cleanup(yt_job)  # an earlier download nobody saved
+        job_id = secrets.token_hex(6)
+        yt_job = {"id": job_id, "url": url, "state": "starting", "percent": 0.0,
+                  "song": "", "artist": "", "title": None, "error": None, "filename": None,
+                  "waiting": False, "wanted": None, "mp3": None, "proc": None,
+                  "dir": os.path.join(YT_TMP, job_id)}
+        job = yt_job
+    threading.Thread(target=youtube_worker, args=(job,), daemon=True).start()
+    return jsonify(youtube_public(job))
+
+
+@app.route("/youtube/save", methods=["POST"])
+def youtube_save():
+    data = request.get_json(silent=True) or {}
+    song = clean_name(data.get("song"), 80)
+    artist = clean_name(data.get("artist"), 60)
+    with yt_lock:
+        job = yt_job
+        if not job or job["id"] != data.get("id"):
+            return jsonify({"error": "This download is no longer running. Start it again."}), 404
+        if not song:
+            return jsonify({"error": "Give the song a name."}), 400
+        job["wanted"] = (song, artist)
+        job["error"] = None
+        if job["state"] == "ready":
+            youtube_finish(job)
+        elif job["state"] in YT_ACTIVE:
+            job["waiting"] = True  # saved as soon as the download finishes
+        return jsonify(youtube_public(job))
+
+
+@app.route("/youtube/cancel", methods=["POST"])
+def youtube_cancel():
+    data = request.get_json(silent=True) or {}
+    with yt_lock:
+        job = yt_job
+        if not job or job["id"] != data.get("id"):
+            return jsonify({"state": "none"})
+        if job["state"] in YT_ACTIVE:
+            job["state"] = "cancelled"
+            proc = job.get("proc")
+            if proc and proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)  # yt-dlp and the FFmpeg it started
+                except (ProcessLookupError, PermissionError):
+                    pass
+        elif job["state"] == "ready":
+            job["state"] = "cancelled"
+            youtube_cleanup(job)
+        return jsonify(youtube_public(job))
+
+
+def switch_audio(jack):
+    """Change speaker while the app runs. Stops playback; returns True if the choice was saved."""
+    global jackInput, music_visualizer_active, play_gen, music_paused, cached_samples, cached_path
+    play_gen += 1                      # any visualizer thread for the old mixer exits
+    music_visualizer_active = False
+    music_paused = False
+    with mixer_lock:
+        try:
+            pygame.mixer.music.stop()
+        except pygame.error:
+            pass
+        pygame.mixer.quit()
+        jackInput = jack
+        start_audio()
+    with samples_lock:
+        cached_samples, cached_path = None, None  # cached levels depend on the mixer's sample rate
+    clear_display()
+    try:
+        save_config()
+        return True
+    except Exception as e:
+        print(f"[Could not save {CONFIG_PATH}: {e}]")
+        return False
+
+
+def apply_volume():
+    """The Pi stays silent while a browser plays the sound; otherwise use the volume slider."""
+    try:
+        pygame.mixer.music.set_volume(0.0 if listener else music_volume)
+    except pygame.error:
+        pass
+
+
+def speaker_info():
+    return {
+        "mode": "jack" if jackInput else "usb",
+        "ok": audio_ok,
+        "error": audio_error,
+        "hasJack": has_jack(),
+        "listener": listener,
+    }
+
+
 @app.route("/audio_mode")
 def audio_mode():
-    return jsonify({"mode": "jack" if jackInput else "usb"})
+    """GET /audio_mode tells where sound plays.
+    ?set=usb or ?set=jack plays it on the Pi; ?set=browser&client=<id> plays it in that browser tab."""
+    global listener
+    choice = request.args.get("set")
+    result = {}
+    if choice == "browser":
+        client = request.args.get("client", "")
+        if re.fullmatch(r"[A-Za-z0-9_-]{1,40}", client):
+            listener = client
+            apply_volume()  # the Pi keeps playing silently so the screen and timing carry on
+            result["saved"] = True
+    elif choice in ("usb", "jack"):
+        listener = None
+        want_jack = choice == "jack"
+        if want_jack == jackInput and audio_ok:
+            apply_volume()  # same speaker and it works: carry on playing, just unmute
+            result["saved"], result["restarted"] = True, False
+        else:
+            result["saved"], result["restarted"] = switch_audio(want_jack), True
+    result.update(speaker_info())
+    return jsonify(result)
+
+
+AUDIO_TYPES = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".flac": "audio/flac", ".m4a": "audio/mp4"}
+
+
+@app.route("/audio/<path:filename>")
+def song_file(filename):
+    """The song itself, for a browser that plays the sound (supports seeking)."""
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in AUDIO_TYPES:
+        return jsonify({"error": "not a song"}), 404
+    # abspath: same folder the rest of the app uses (Flask would otherwise resolve it from music.py's folder)
+    return send_from_directory(os.path.abspath(MUSIC_DIR), filename,
+                               mimetype=AUDIO_TYPES[ext], conditional=True)
 
 
 def song_length(path):
@@ -693,6 +1131,11 @@ def player_state():
         "position": max(0, pos_ms) / 1000 if state != "stopped" else 0,
         "length": song_length(path) if path else 0,
         "volume": round(music_volume, 2),
+        "speaker": "jack" if jackInput else "usb",
+        "speakerOk": audio_ok,
+        "speakerError": audio_error,
+        "hasJack": has_jack(),
+        "listener": listener,
     })
 
 
@@ -702,10 +1145,7 @@ def set_volume():
     level = request.args.get("level", type=float)
     if level is not None:
         music_volume = max(0.0, min(1.0, level))
-        try:
-            pygame.mixer.music.set_volume(music_volume)
-        except pygame.error:
-            pass
+        apply_volume()
     return jsonify({"volume": round(music_volume, 2)})
 
 
