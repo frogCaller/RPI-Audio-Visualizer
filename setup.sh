@@ -71,6 +71,14 @@ pip install --upgrade pip setuptools wheel
 log "Installing Python dependencies inside venv..."
 pip install "${REQUIREMENTS[@]}"
 
+# ---------- 4.5. YouTube downloads (yt-dlp + Deno, and FFmpeg for MP3) ----------
+log "Installing the YouTube downloader..."
+pip install --upgrade "yt-dlp[default,deno]" || pip install --upgrade "yt-dlp[default]" || \
+    warn "yt-dlp install failed — downloading from YouTube won't work."
+if command -v apt-get >/dev/null; then
+    sudo apt-get install -y ffmpeg || warn "FFmpeg install failed — downloading from YouTube won't work."
+fi
+
 # ---------- 5. Optional: system packages for GPIO ----------
 if command -v apt-get >/dev/null; then
     if command -v sudo >/dev/null; then
