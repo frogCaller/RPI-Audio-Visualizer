@@ -39,7 +39,7 @@ frame_seq = 0                      # counts frames sent to the OLED
 music_volume = 1.0                 # kept here because pygame resets volume on load
 song_lengths = {}                  # song path -> length in seconds
 audio_ok = False                   # False when no speaker could be opened (silent mode)
-audio_error = None                 # "missing" or "busy" when audio_ok is False
+audio_error = None                 # why there's no sound: "nocard", "failed", "busy" or "missing"
 listener = None                    # browser tab playing the sound itself, or None for the Pi
 CONFIG_PATH = "config.yaml"
 
@@ -212,14 +212,15 @@ ASOUND_CARDS = "/proc/asound/cards"
 
 
 def sound_cards():
-    """Sound cards the Pi can see: [(number, name, driver)], e.g. (1, "Audio", "USB-Audio")."""
+    """Sound cards the Pi can see: [(number, name, driver, long name)],
+    e.g. (1, "Device", "USB-Audio", "USB2.0 Device")."""
     cards = []
     try:
         with open(ASOUND_CARDS) as f:
             for line in f:
-                m = re.match(r"\s*(\d+)\s+\[(\S+)\s*\]:\s*(\S+)", line)
+                m = re.match(r"\s*(\d+)\s+\[(\S+)\s*\]:\s*(\S+)(?:\s+-\s+(.*))?", line)
                 if m:
-                    cards.append((int(m.group(1)), m.group(2), m.group(3)))
+                    cards.append((int(m.group(1)), m.group(2), m.group(3), (m.group(4) or m.group(2)).strip()))
     except OSError:
         pass
     return cards
@@ -230,7 +231,7 @@ def has_jack():
     if not os.path.exists(ASOUND_CARDS):
         return True
     return any(name in ("Headphones", "ALSA") or driver.startswith("bcm2835")
-               for _, name, driver in sound_cards())
+               for _, name, driver, _ in sound_cards())
 
 
 def silent_mode():
@@ -246,7 +247,7 @@ def init_audio_jack():
         os.environ["SDL_AUDIODRIVER"] = "alsa"
 
         # the Pi's own headphone jack by name first, if it has one
-        if any(name == "Headphones" for _, name, _ in sound_cards()):
+        if any(name == "Headphones" for _, name, _, _ in sound_cards()):
             try:
                 pygame.mixer.init(frequency=48000, size=-16, channels=2, buffer=2048,
                                   devicename="plughw:CARD=Headphones,DEV=0")
@@ -278,7 +279,7 @@ def init_audio():
     global audio_ok, audio_error
     # the card name that worked before first, then every USB sound card the Pi can see
     devices = ["plughw:CARD=Audio,DEV=0"]
-    usb_cards = [name for _, name, driver in sound_cards() if driver == "USB-Audio"]
+    usb_cards = [name for _, name, driver, _ in sound_cards() if driver == "USB-Audio"]
     for name in usb_cards:
         dev = f"plughw:CARD={name},DEV=0"
         if dev not in devices:
@@ -299,7 +300,12 @@ def init_audio():
     print("[Audio init failed] " + " | ".join(errors))
     print("[USB sound cards found: " + (", ".join(usb_cards) or "none") + "] Using silent mode.")
     audio_ok = False
-    audio_error = "busy" if any("busy" in e.lower() for e in errors) else "missing"
+    if any("busy" in e.lower() for e in errors):
+        audio_error = "busy"      # another program has the speaker
+    elif usb_cards:
+        audio_error = "failed"    # the Pi sees a USB speaker but couldn't open it
+    else:
+        audio_error = "nocard"    # the Pi doesn't see a USB speaker at all
     silent_mode()
 
 
@@ -1015,23 +1021,27 @@ def youtube_cancel():
         return jsonify(youtube_public(job))
 
 
+switch_lock = threading.Lock()  # one speaker change at a time (a tap and the plug-in watcher)
+
+
 def switch_audio(jack):
     """Change speaker while the app runs. Stops playback; returns True if the choice was saved."""
     global jackInput, music_visualizer_active, play_gen, music_paused, cached_samples, cached_path
-    play_gen += 1                      # any visualizer thread for the old mixer exits
-    music_visualizer_active = False
-    music_paused = False
-    with mixer_lock:
-        try:
-            pygame.mixer.music.stop()
-        except pygame.error:
-            pass
-        pygame.mixer.quit()
-        jackInput = jack
-        start_audio()
-    with samples_lock:
-        cached_samples, cached_path = None, None  # cached levels depend on the mixer's sample rate
-    clear_display()
+    with switch_lock:
+        play_gen += 1                      # any visualizer thread for the old mixer exits
+        music_visualizer_active = False
+        music_paused = False
+        with mixer_lock:
+            try:
+                pygame.mixer.music.stop()
+            except pygame.error:
+                pass
+            pygame.mixer.quit()
+            jackInput = jack
+            start_audio()
+        with samples_lock:
+            cached_samples, cached_path = None, None  # cached levels depend on the mixer's sample rate
+        clear_display()
     try:
         save_config()
         return True
@@ -1048,11 +1058,43 @@ def apply_volume():
         pass
 
 
+def usb_speakers():
+    """Names of the USB speakers the Pi can see, e.g. ["USB2.0 Device"]."""
+    return [long_name for _, _, driver, long_name in sound_cards() if driver == "USB-Audio"]
+
+
+def speaker_watch():
+    """Plug in a USB speaker while there's no sound, and the Pi starts using it by itself."""
+    tried = None
+    while True:
+        time.sleep(3)
+        try:
+            if audio_ok:
+                tried = None
+                continue
+            cards = tuple(usb_speakers())
+            if jackInput or listener or not cards or cards == tried:
+                continue  # nothing new to try (a failed speaker is retried once it's replugged)
+            tried = cards
+            song = current_song_path if (pygame.mixer.music.get_busy() or music_paused) else None
+            print(f"[USB speaker plugged in: {', '.join(cards)}]")
+            switch_audio(False)
+            if song:
+                # keep the music going: with sound if the speaker worked, silently (screen only) if not
+                play_song(os.path.basename(song))
+        except Exception as e:
+            print(f"[Speaker check failed: {e}]")
+
+
+threading.Thread(target=speaker_watch, daemon=True, name="SpeakerWatch").start()
+
+
 def speaker_info():
     return {
         "mode": "jack" if jackInput else "usb",
         "ok": audio_ok,
         "error": audio_error,
+        "cards": usb_speakers(),
         "hasJack": has_jack(),
         "listener": listener,
     }
@@ -1134,6 +1176,7 @@ def player_state():
         "speaker": "jack" if jackInput else "usb",
         "speakerOk": audio_ok,
         "speakerError": audio_error,
+        "speakerCards": usb_speakers(),
         "hasJack": has_jack(),
         "listener": listener,
     })
